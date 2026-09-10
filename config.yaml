@@ -1,0 +1,4 @@
+org: "my-org"
+clone_dir: ".repos"
+report_path: "report.html"
+opencode_binary: "opencode"

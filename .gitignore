@@ -1,0 +1,6 @@
+.repos/
+.env
+*.pyc
+__pycache__/
+.pytest_cache/
+report.html
