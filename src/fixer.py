@@ -26,18 +26,11 @@ _BASE_FIX_PROMPT = (
     "action is outside the approved scope. "
 )
 
-_NPM_LOCKFILE_RULE = (
-    " This is an npm project (frontend and/or backend). "
-    "If this vulnerability is caused by packages in package-lock.json, "
-    "delete the affected package-lock.json — this deletion is pre-approved, do NOT ask for confirmation. "
-    "Do not fix it line by line."
-)
-
 _TRANSITIVE_DEP_RULE = (
     " This is a TRANSITIVE dependency: {package} is pulled in by another dependency, "
-    "not declared directly. Always fix it by upgrading the DIRECT dependency that introduces it — "
-    "find the parent with the build tool (mvn dependency:tree, npm ls, gradle dependencies) "
-    "and upgrade that parent. Do NOT pin, patch, or edit the transitive package itself."
+    "not declared directly. {fix_instruction} "
+    "Do NOT run dependency-tree exploration commands (mvn dependency:tree, npm ls, gradle dependencies) — "
+    "apply the fix directly and stop."
 )
 
 
@@ -205,14 +198,51 @@ def _run_agent_streaming(cmd: list[str], cwd: str, timeout: int, tag: str) -> tu
     return proc.returncode, "\n".join(out_lines)
 
 
+def _commit_lockfile_removal(repo_path: Path, manifest_path: str, advisory_id: str) -> bool:
+    """Delete a lockfile and commit the removal. Returns True if committed."""
+    lockfile = (repo_path / manifest_path).resolve()
+    if repo_path.resolve() not in lockfile.parents or not lockfile.is_file():
+        logger.warning(f"  Skipping lockfile delete: {manifest_path} is outside the repo or missing")
+        return False
+    lockfile.unlink()
+    logger.info(f"  Deleted {manifest_path} before invoking agent")
+    subprocess.run(["git", "-C", str(repo_path), "add", manifest_path], check=True)
+    result = subprocess.run(
+        ["git", "-C", str(repo_path), "commit", "-m", f"fix: remove {manifest_path} ({advisory_id})"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if result.returncode != 0:
+        logger.warning(f"  Failed to commit lockfile removal for {advisory_id}")
+        return False
+    logger.info(f"  Lockfile-only fix for {advisory_id}: committed removal, skipping agent")
+    return True
+
+
 def apply_fix(config: Config, repo_path: Path, vuln: Vulnerability) -> bool:
     """Invoke agent CLI to fix a vulnerability. Returns True if fix applied."""
     affected = ", ".join(vuln.affected_files) if vuln.affected_files else "affected files"
 
-    if vuln.source == "dependabot" and vuln.manifest_path and vuln.package_name:
-        vuln.introduced_at = _find_manifest_lines(repo_path, vuln.manifest_path, vuln.package_name)
-    elif vuln.source == "code_scanning" and vuln.affected_files:
-        vuln.introduced_at = _read_code_snippet(repo_path, vuln.affected_files[0], vuln.start_line)
+    is_npm = _is_npm_project(repo_path)
+    npm_lockfile_case = bool(
+        is_npm and vuln.manifest_path and vuln.manifest_path.endswith("package-lock.json")
+    )
+
+    if npm_lockfile_case and vuln.manifest_path:
+        # Lockfile-only fix: delete + commit + PR via caller, no agent (saves tokens).
+        vuln.introduced_at = None
+        try:
+            if _commit_lockfile_removal(repo_path, vuln.manifest_path, vuln.advisory_id):
+                return True
+        except Exception as e:
+            logger.warning(f"  Lockfile-only fix failed for {vuln.advisory_id}: {e}, falling back to agent")
+    if not npm_lockfile_case:
+        if vuln.source == "dependabot" and vuln.manifest_path and vuln.package_name:
+            vuln.introduced_at = _find_manifest_lines(repo_path, vuln.manifest_path, vuln.package_name)
+        elif vuln.source == "code_scanning" and vuln.affected_files:
+            vuln.introduced_at = _read_code_snippet(repo_path, vuln.affected_files[0], vuln.start_line)
 
     suggestion = ""
     if vuln.package_name and vuln.patched_version:
@@ -232,10 +262,15 @@ def apply_fix(config: Config, repo_path: Path, vuln: Vulnerability) -> bool:
         prompt += f" The dependency is declared in {vuln.manifest_path}."
     if vuln.introduced_at:
         prompt += f" Exact introducing location:\n{vuln.introduced_at}"
-    if _is_npm_project(repo_path):
-        prompt += _NPM_LOCKFILE_RULE
     if vuln.dependency_relationship == "transitive" and vuln.package_name:
-        prompt += _TRANSITIVE_DEP_RULE.format(package=vuln.package_name)
+        if vuln.patched_version:
+            fix_instruction = (
+                f"GitHub recommends version {vuln.patched_version}: "
+                f"pin {vuln.package_name} to that version as a direct dependency."
+            )
+        else:
+            fix_instruction = "Upgrade the direct dependency that introduces it to a fixed version."
+        prompt += _TRANSITIVE_DEP_RULE.format(package=vuln.package_name, fix_instruction=fix_instruction)
 
     logger.info(f"Invoking agent {_agent_label(config.ai_agent_args, config.ai_agent_model)} for {vuln.advisory_id}...")
     logger.info(f"  Severity: {vuln.severity} | Package: {vuln.package_name} | Source: {vuln.source}")

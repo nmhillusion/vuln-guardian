@@ -71,33 +71,6 @@ def test_apply_fix_agent_fails(tmp_path):
         assert result is False
 
 
-def test_apply_fix_npm_project_gets_lockfile_rule(tmp_path):
-    backend = tmp_path / "backend"
-    backend.mkdir()
-    (backend / "package.json").write_text("{}", encoding="utf-8")
-    config = _make_config()
-    vuln = _make_vuln()
-    with patch("subprocess.Popen") as mock_popen, patch("subprocess.run") as mock_run:
-        mock_popen.return_value = _fake_proc()
-        mock_run.return_value = MagicMock(returncode=0)
-        with patch("src.fixer._has_changes", return_value=True):
-            apply_fix(config, tmp_path, vuln)
-    prompt = mock_popen.call_args.args[0][config.ai_agent_args.index("{prompt}")]
-    assert "delete the affected package-lock.json" in prompt
-
-
-def test_apply_fix_non_npm_project_no_lockfile_rule(tmp_path):
-    config = _make_config()
-    vuln = _make_vuln()
-    with patch("subprocess.Popen") as mock_popen, patch("subprocess.run") as mock_run:
-        mock_popen.return_value = _fake_proc()
-        mock_run.return_value = MagicMock(returncode=0)
-        with patch("src.fixer._has_changes", return_value=True):
-            apply_fix(config, tmp_path, vuln)
-    prompt = mock_popen.call_args.args[0][config.ai_agent_args.index("{prompt}")]
-    assert "delete the affected package-lock.json" not in prompt
-
-
 def test_apply_fix_custom_agent_template(tmp_path):
     config = _make_config(ai_agent_args=["gemini", "-p", "{prompt}"])
     vuln = _make_vuln()
@@ -220,7 +193,22 @@ def test_apply_fix_transitive_dep_rule(tmp_path):
     prompt = _prompt_of_last_agent_call(mock_popen, config)
     assert "TRANSITIVE dependency" in prompt
     assert "org.apache.calcite:calcite-core" in prompt
-    assert "DIRECT dependency" in prompt
+    assert "GitHub recommends version 1.42.0" in prompt
+    assert "Do NOT run dependency-tree" in prompt
+
+
+def test_apply_fix_transitive_dep_no_patched_version(tmp_path):
+    config = _make_config()
+    vuln = _make_dep_vuln()
+    vuln.patched_version = None
+    with patch("subprocess.Popen") as mock_popen, patch("subprocess.run") as mock_run:
+        mock_popen.return_value = _fake_proc()
+        mock_run.return_value = MagicMock(returncode=0)
+        with patch("src.fixer._has_changes", return_value=True):
+            apply_fix(config, tmp_path, vuln)
+    prompt = _prompt_of_last_agent_call(mock_popen, config)
+    assert "Upgrade the direct dependency that introduces it" in prompt
+    assert "Do NOT run dependency-tree" in prompt
 
 
 def test_apply_fix_streams_agent_output_to_log(tmp_path, caplog):
@@ -235,6 +223,55 @@ def test_apply_fix_streams_agent_output_to_log(tmp_path, caplog):
                 apply_fix(config, tmp_path, vuln)
     assert "[GHSA-test-1234] working on fix" in caplog.text
     assert "[GHSA-test-1234] done" in caplog.text
+
+
+def test_apply_fix_npm_lockfile_fast_path_no_agent(tmp_path):
+    (tmp_path / "package.json").write_text('{"dependencies": {"brace-expansion": "^1.1.12"}}', encoding="utf-8")
+    lockfile = tmp_path / "package-lock.json"
+    lockfile.write_text(
+        '{"packages": {"node_modules/brace-expansion": {"version": "1.1.12"}}}', encoding="utf-8"
+    )
+    config = _make_config()
+    vuln = _make_vuln()
+    vuln.source = "dependabot"
+    vuln.package_name = "brace-expansion"
+    vuln.patched_version = "1.1.18"
+    vuln.manifest_path = "package-lock.json"
+    vuln.dependency_relationship = "transitive"
+    with patch("subprocess.Popen") as mock_popen, patch("subprocess.run") as mock_run:
+        mock_popen.return_value = _fake_proc()
+        mock_run.return_value = MagicMock(returncode=0)
+        with patch("src.fixer._has_changes", return_value=True):
+            result = apply_fix(config, tmp_path, vuln)
+    assert result is True
+    assert not lockfile.exists()
+    mock_popen.assert_not_called()
+    commits = [c for c in mock_run.call_args_list if "commit" in c.args[0]]
+    assert len(commits) == 1
+    assert "remove package-lock.json" in commits[0].args[0][-1]
+
+
+def test_apply_fix_npm_lockfile_commit_fails_falls_back_to_agent(tmp_path):
+    (tmp_path / "package.json").write_text('{"dependencies": {"minimatch": "^3.1.5"}}', encoding="utf-8")
+    lockfile = tmp_path / "package-lock.json"
+    lockfile.write_text(
+        '{"packages": {"node_modules/brace-expansion": {"version": "1.1.12"}}}', encoding="utf-8"
+    )
+    config = _make_config()
+    vuln = _make_vuln()
+    vuln.source = "dependabot"
+    vuln.package_name = "brace-expansion"
+    vuln.patched_version = "1.1.18"
+    vuln.manifest_path = "package-lock.json"
+    vuln.dependency_relationship = "transitive"
+    ok, fail = MagicMock(returncode=0), MagicMock(returncode=1)
+    with patch("subprocess.Popen") as mock_popen, patch("subprocess.run") as mock_run:
+        mock_popen.return_value = _fake_proc()
+        mock_run.side_effect = [ok, fail, ok, ok]
+        with patch("src.fixer._has_changes", return_value=True):
+            result = apply_fix(config, tmp_path, vuln)
+    assert result is True
+    mock_popen.assert_called_once()
 
 
 def test_apply_fix_direct_dep_no_transitive_rule(tmp_path):
