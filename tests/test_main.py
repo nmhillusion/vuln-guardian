@@ -1,8 +1,21 @@
 # tests/test_main.py
+import logging
 import pytest
 from unittest.mock import patch, MagicMock
-from src.main import main, _batch_vulns, _batch_branch_name
+from src.main import main, _batch_vulns, _batch_branch_name, _ColorFormatter
 from src.models import Vulnerability
+
+
+def _record(level, msg):
+    return logging.LogRecord("test", level, __file__, 1, msg, None, None)
+
+
+def test_color_formatter_banners_magenta():
+    f = _ColorFormatter("%(message)s", use_color=True)
+    assert f.format(_record(logging.INFO, "===== START fix X =====")).startswith("\x1b[35m")
+    assert f.format(_record(logging.INFO, "regular line")).startswith("\x1b[32m")
+    plain = _ColorFormatter("%(message)s", use_color=False)
+    assert plain.format(_record(logging.INFO, "===== START fix X =====")) == "===== START fix X ====="
 
 
 def test_main_dry_run(tmp_path):

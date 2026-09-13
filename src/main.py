@@ -41,7 +41,10 @@ class _ColorFormatter(logging.Formatter):
         text = super().format(record)
         if not self.use_color:
             return text
-        return f"{self.COLORS.get(record.levelno, '')}{text}{self.RESET}"
+        color = self.COLORS.get(record.levelno, "")
+        if record.getMessage().startswith("====="):
+            color = "\033[35m"  # magenta for START/END fix banners
+        return f"{color}{text}{self.RESET}"
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
