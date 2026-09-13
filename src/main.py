@@ -20,6 +20,29 @@ from src.reporter import generate_report
 logger = logging.getLogger("github-advisor")
 
 
+class _ColorFormatter(logging.Formatter):
+    """ANSI-color log lines by level. No-op when colors are disabled."""
+
+    COLORS = {
+        logging.DEBUG: "\033[36m",  # cyan
+        logging.INFO: "\033[32m",  # green
+        logging.WARNING: "\033[33m",  # yellow
+        logging.ERROR: "\033[31m",  # red
+        logging.CRITICAL: "\033[35m",  # magenta
+    }
+    RESET = "\033[0m"
+
+    def __init__(self, fmt: str, use_color: bool = True):
+        super().__init__(fmt)
+        self.use_color = use_color
+
+    def format(self, record: logging.LogRecord) -> str:
+        text = super().format(record)
+        if not self.use_color:
+            return text
+        return f"{self.COLORS.get(record.levelno, '')}{text}{self.RESET}"
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="GitHub Advisor Agent — auto-fix security advisories")
     parser.add_argument("--dry-run", action="store_true", help="Fetch advisories and generate report, skip clone/fix/PR")
@@ -28,6 +51,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--config", type=str, default="config.yaml", help="Path to config file")
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
     parser.add_argument("--no-browser", action="store_true", help="Don't auto-open the HTML report")
+    parser.add_argument("--no-color", action="store_true", help="Disable colored log output")
     parser.add_argument("--max-fixes", type=int, default=5, help="Max fix attempts per run (default: 5)")
     return parser.parse_args(argv)
 
@@ -121,11 +145,12 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
 
     log_level = logging.DEBUG if args.verbose else logging.INFO
-    logging.basicConfig(
-        level=log_level,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        force=True,
+    use_color = sys.stdout.isatty() and not args.no_color
+    handler = logging.StreamHandler()
+    handler.setFormatter(
+        _ColorFormatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", use_color=use_color)
     )
+    logging.basicConfig(level=log_level, handlers=[handler], force=True)
 
     try:
         config = load_config(args.config)

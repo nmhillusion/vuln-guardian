@@ -239,6 +239,36 @@ def test_apply_fix_no_position_without_params(tmp_path, caplog):
     assert "(fix " not in caplog.text
 
 
+def test_apply_fix_start_end_banners(tmp_path, caplog):
+    import logging
+    config = _make_config()
+    vuln = _make_vuln()
+    with patch("subprocess.Popen") as mock_popen, patch("subprocess.run") as mock_run:
+        mock_popen.return_value = _fake_proc()
+        mock_run.return_value = MagicMock(returncode=0)
+        with patch("src.fixer._has_changes", return_value=True):
+            with caplog.at_level(logging.INFO, logger="src.fixer"):
+                result = apply_fix(config, tmp_path, vuln, fix_number=2, max_fixes=5)
+    assert result is True
+    assert "===== START fix GHSA-test-1234 (fix 2/5) =====" in caplog.text
+    assert "===== END fix GHSA-test-1234 (fix 2/5): FIXED =====" in caplog.text
+
+
+def test_apply_fix_end_banner_no_fix(tmp_path, caplog):
+    import logging
+    config = _make_config()
+    vuln = _make_vuln()
+    with patch("subprocess.Popen") as mock_popen, patch("subprocess.run") as mock_run:
+        mock_popen.return_value = _fake_proc()
+        mock_run.return_value = MagicMock(returncode=0)
+        with patch("src.fixer._has_changes", return_value=False):
+            with caplog.at_level(logging.INFO, logger="src.fixer"):
+                result = apply_fix(config, tmp_path, vuln)
+    assert result is False
+    assert "===== START fix GHSA-test-1234 =====" in caplog.text
+    assert "===== END fix GHSA-test-1234: NO FIX =====" in caplog.text
+
+
 def test_apply_fix_streams_agent_output_to_log(tmp_path, caplog):
     import logging
     config = _make_config()

@@ -221,7 +221,28 @@ def _commit_lockfile_removal(repo_path: Path, manifest_path: str, advisory_id: s
     return True
 
 
+def _fix_position(fix_number: int | None, max_fixes: int | None) -> str:
+    if fix_number is not None and max_fixes is not None:
+        return f" (fix {fix_number}/{max_fixes})"
+    return ""
+
+
 def apply_fix(
+    config: Config,
+    repo_path: Path,
+    vuln: Vulnerability,
+    fix_number: int | None = None,
+    max_fixes: int | None = None,
+) -> bool:
+    """Fix a vulnerability, logging START/END banners. Returns True if fix applied."""
+    position = _fix_position(fix_number, max_fixes)
+    logger.info(f"===== START fix {vuln.advisory_id}{position} =====")
+    ok = _apply_fix_inner(config, repo_path, vuln, fix_number, max_fixes)
+    logger.info(f"===== END fix {vuln.advisory_id}{position}: {'FIXED' if ok else 'NO FIX'} =====")
+    return ok
+
+
+def _apply_fix_inner(
     config: Config,
     repo_path: Path,
     vuln: Vulnerability,
@@ -278,7 +299,7 @@ def apply_fix(
             fix_instruction = "Upgrade the direct dependency that introduces it to a fixed version."
         prompt += _TRANSITIVE_DEP_RULE.format(package=vuln.package_name, fix_instruction=fix_instruction)
 
-    position = f" (fix {fix_number}/{max_fixes})" if fix_number is not None and max_fixes is not None else ""
+    position = _fix_position(fix_number, max_fixes)
     logger.info(f"Invoking agent {_agent_label(config.ai_agent_args, config.ai_agent_model)} for {vuln.advisory_id}{position}...")
     logger.info(f"  Severity: {vuln.severity} | Package: {vuln.package_name} | Source: {vuln.source}")
     if vuln.dependency_relationship or vuln.dependency_scope or vuln.manifest_path:
