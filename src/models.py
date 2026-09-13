@@ -33,4 +33,6 @@ class RunResult:
     prs_created: int = 0
     skipped: int = 0
     prs: list[dict] = field(default_factory=list)
+    pending_prs: list[dict] = field(default_factory=list)  # open tool PRs from any run
+    skipped_items: list[dict] = field(default_factory=list)  # {repo, advisory_id, reason}
     errors: list[str] = field(default_factory=list)

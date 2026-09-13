@@ -15,7 +15,7 @@ from src.fetcher import list_repos, fetch_repo_advisories
 from src.models import RunResult, Vulnerability
 from src.repo import clone_or_update, detect_default_branch, branch_exists, create_branch, checkout
 from src.fixer import apply_fix
-from src.pr import create_pull_request, pr_exists_for_branch
+from src.pr import create_pull_request, pr_exists_for_branch, fetch_open_tool_prs
 from src.reporter import generate_report
 
 logger = logging.getLogger("github-advisor")
@@ -86,6 +86,13 @@ def _batch_branch_name(batch: list[Vulnerability]) -> str:
     return f"fix/batch-{digest}"
 
 
+def _record_skip(result: RunResult, repo_full_name: str, vulns: list[Vulnerability], reason: str) -> None:
+    """Count a skip and record what was skipped for the report."""
+    result.skipped += len(vulns)
+    for v in vulns:
+        result.skipped_items.append({"repo": repo_full_name, "advisory_id": v.advisory_id, "reason": reason})
+
+
 def process_repo(
     client: GitHubClient,
     config: Config,
@@ -115,11 +122,11 @@ def process_repo(
         legacy_branch = f"fix/{vuln.advisory_id}"
         if pr_exists_for_branch(client, repo_full_name, legacy_branch):
             logger.info(f"PR already exists for {vuln.advisory_id}, skipping")
-            result.skipped += 1
+            _record_skip(result, repo_full_name, [vuln], "PR already exists")
             continue
         if branch_exists(repo_path, legacy_branch):
             logger.info(f"Branch {legacy_branch} already exists, skipping")
-            result.skipped += 1
+            _record_skip(result, repo_full_name, [vuln], "branch already exists")
             continue
         pending.append(vuln)
 
@@ -134,12 +141,12 @@ def process_repo(
 
         if pr_exists_for_branch(client, repo_full_name, branch_name):
             logger.info(f"PR already exists for {branch_name}, skipping batch")
-            result.skipped += len(batch)
+            _record_skip(result, repo_full_name, batch, "batch PR already exists")
             continue
 
         if branch_exists(repo_path, branch_name):
             logger.info(f"Branch {branch_name} already exists, skipping batch")
-            result.skipped += len(batch)
+            _record_skip(result, repo_full_name, batch, "batch branch already exists")
             continue
 
         try:
@@ -154,7 +161,7 @@ def process_repo(
 
         if not apply_fix(config, repo_path, batch, fix_number=result.fixes_attempted, max_fixes=max_fixes):
             logger.info(f"No fix applied for batch {branch_name}, skipping PR")
-            result.skipped += len(batch)
+            _record_skip(result, repo_full_name, batch, "no fix produced")
             checkout(repo_path, default_branch)
             subprocess.run(["git", "-C", str(repo_path), "branch", "-D", branch_name], capture_output=True)
             continue
@@ -241,6 +248,7 @@ def main(argv: list[str] | None = None) -> None:
         for repo_full_name in repos:
             vulns = fetch_repo_advisories(client, repo_full_name)
             result.vulns_found += len(vulns)
+            result.pending_prs.extend(fetch_open_tool_prs(client, repo_full_name))
 
             if not vulns:
                 logger.info(f"SKIP {repo_full_name} — no open vulnerabilities")

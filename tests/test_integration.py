@@ -39,6 +39,7 @@ def test_full_dry_run_pipeline(tmp_path):
          patch("src.main.GitHubClient") as mock_client_cls, \
          patch("src.main.list_repos", return_value=["test-org/repo1", "test-org/repo2"]), \
          patch("src.main.fetch_repo_advisories", side_effect=[[vulns[0]], [vulns[1]]]), \
+         patch("src.main.fetch_open_tool_prs", return_value=[]), \
          patch("src.main.webbrowser") as mock_browser, \
          patch("src.main.generate_report") as mock_report:
         from src.config import Config

@@ -1,6 +1,6 @@
 # tests/test_pr.py
 from unittest.mock import MagicMock, patch
-from src.pr import create_pull_request, pr_exists_for_branch
+from src.pr import create_pull_request, pr_exists_for_branch, fetch_open_tool_prs
 from src.models import Vulnerability
 
 
@@ -41,3 +41,25 @@ def test_create_pull_request():
     assert payload["head"] == "fix/batch-abc123"
     assert payload["title"] == "Fix: 2 vulnerabilities (GHSA-test-1111, GHSA-test-2222)"
     assert "GHSA-test-1111" in payload["body"] and "GHSA-test-2222" in payload["body"]
+    assert "[vuln-guardian](https://github.com/nmhillusion/vuln-guardian)" in payload["body"]
+
+
+def test_fetch_open_tool_prs():
+    client = MagicMock()
+    client.get_paginated.return_value = [
+        {"number": 1, "title": "Fix: brace-expansion DoS (GHSA-aaa)",
+         "html_url": "https://github.com/o/r/pull/1",
+         "head": {"ref": "fix/GHSA-aaa"}},
+        {"number": 2, "title": "Fix: 2 vulnerabilities (GHSA-bbb, GHSA-ccc)",
+         "html_url": "https://github.com/o/r/pull/2",
+         "head": {"ref": "fix/batch-abc123"}},
+        {"number": 3, "title": "My feature",
+         "html_url": "https://github.com/o/r/pull/3",
+         "head": {"ref": "feature/cool"}},
+    ]
+    rows = fetch_open_tool_prs(client, "o/r")
+    assert len(rows) == 2
+    assert rows[0]["advisory_id"] == "GHSA-aaa"
+    assert rows[0]["pr_number"] == 1
+    assert rows[1]["advisory_id"] == "GHSA-bbb, GHSA-ccc"
+    assert rows[1]["pr_number"] == 2
