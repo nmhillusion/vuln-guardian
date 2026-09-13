@@ -12,6 +12,7 @@ def test_main_dry_run(tmp_path):
          patch("src.main.GitHubClient") as mock_client_cls, \
          patch("src.main.list_repos", return_value=[]), \
          patch("src.main.fetch_repo_advisories") as mock_fetch, \
+         patch("src.main.webbrowser") as mock_browser, \
          patch("src.main.generate_report", return_value="<html></html>"):
         mock_config.return_value = MagicMock(
             org="test-org",
@@ -22,6 +23,8 @@ def test_main_dry_run(tmp_path):
         mock_client_cls.return_value = MagicMock()
         main(["--dry-run", "--config", str(config_path)])
         mock_fetch.assert_not_called()
+        mock_browser.open.assert_called_once()
+        assert mock_browser.open.call_args.args[0].startswith("file://")
 
 
 def _make_vuln(repo, advisory_id):

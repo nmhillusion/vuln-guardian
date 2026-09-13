@@ -5,6 +5,7 @@ import argparse
 import logging
 import subprocess
 import sys
+import webbrowser
 from pathlib import Path
 
 from src.config import load_config, Config
@@ -26,6 +27,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--org", type=str, default=None, help="Override org from config")
     parser.add_argument("--config", type=str, default="config.yaml", help="Path to config file")
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
+    parser.add_argument("--no-browser", action="store_true", help="Don't auto-open the HTML report")
     parser.add_argument("--max-fixes", type=int, default=5, help="Max fix attempts per run (default: 5)")
     return parser.parse_args(argv)
 
@@ -166,6 +168,11 @@ def main(argv: list[str] | None = None) -> None:
         report_html = generate_report(result, config.report_path)
         logger.info(f"Report saved to {config.report_path}")
 
+        report_uri = Path(config.report_path).resolve().as_uri()
+        if not args.no_browser:
+            logger.info(f"Opening report in browser: {report_uri}")
+            webbrowser.open(report_uri)
+
         print(f"\n--- Summary ---")
         print(f"Repos scanned: {result.repos_scanned}")
         print(f"Vulnerabilities found: {result.vulns_found}")
@@ -173,6 +180,7 @@ def main(argv: list[str] | None = None) -> None:
         print(f"PRs created: {result.prs_created}")
         print(f"Skipped: {result.skipped}")
         print(f"Errors: {len(result.errors)}")
+        print(f"Report: {report_uri}")
         if result.errors:
             for err in result.errors:
                 print(f"  - {err}")
