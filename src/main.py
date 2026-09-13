@@ -55,6 +55,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--no-color", action="store_true", help="Disable colored log output")
     parser.add_argument("--max-fixes", type=int, default=5, help="Max fix batches per run (default: 5)")
     parser.add_argument("--batch-size", type=int, default=5, help="Max vulnerabilities per fix batch/PR (default: 5)")
+    parser.add_argument("--yes", action="store_true", help="Auto-approve prompts (e.g. clone directory creation)")
     return parser.parse_args(argv)
 
 
@@ -207,6 +208,25 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.org:
         config.org = args.org
+
+    if not args.dry_run and not args.report_only:
+        clone_path = Path(config.clone_dir).resolve()
+        if not clone_path.exists():
+            if args.yes:
+                approved = True
+            else:
+                answer = input(
+                    f"Clone directory does not exist:\n"
+                    f"  {clone_path}\n"
+                    f"(You can change this path with 'clone_dir' in {args.config}.)\n"
+                    f"Create this directory? [y/N]: "
+                )
+                approved = answer.strip().lower() in ("y", "yes")
+            if not approved:
+                logger.error("Aborted: clone directory not approved")
+                sys.exit(1)
+            clone_path.mkdir(parents=True, exist_ok=True)
+            config.clone_dir = str(clone_path)
 
     client = GitHubClient(config.github_pat)
 

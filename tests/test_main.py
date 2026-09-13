@@ -1,4 +1,5 @@
 # tests/test_main.py
+import pytest
 from unittest.mock import patch, MagicMock
 from src.main import main, _batch_vulns, _batch_branch_name
 from src.models import Vulnerability
@@ -94,6 +95,8 @@ def test_main_stops_after_max_fixes(tmp_path):
          patch("src.main.list_repos", return_value=repos), \
          patch("src.main.fetch_repo_advisories") as mock_fetch, \
          patch("src.main.process_repo", side_effect=fake_process_repo), \
+         patch("src.main.webbrowser"), \
+         patch("builtins.input", return_value="y"), \
          patch("src.main.generate_report", return_value="<html></html>"):
         mock_config.return_value = MagicMock(
             org="test-org",
@@ -105,3 +108,58 @@ def test_main_stops_after_max_fixes(tmp_path):
         mock_fetch.side_effect = lambda client, repo: [_make_vuln(repo, f"GHSA-{repo.split('/')[-1]}")]
         main(["--config", str(config_path)])
         assert mock_fetch.call_count == 5
+
+
+def _fix_mode_config(tmp_path):
+    from src.config import Config
+    return Config(
+        org="test-org",
+        clone_dir=str(tmp_path / "clones"),
+        report_path=str(tmp_path / "report.html"),
+        github_pat="ghp_test",
+    )
+
+
+def _run_fix_mode(tmp_path, argv_extra, input_return="y"):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("org: test-org\n")
+    with patch("src.main.load_config") as mock_config, \
+         patch("src.main.GitHubClient") as mock_client_cls, \
+         patch("src.main.list_repos", return_value=[]), \
+         patch("src.main.webbrowser"), \
+         patch("src.main.generate_report", return_value="<html></html>"), \
+         patch("builtins.input", return_value=input_return) as mock_input:
+        mock_config.return_value = _fix_mode_config(tmp_path)
+        mock_client_cls.return_value = MagicMock()
+        main(["--config", str(config_path), *argv_extra])
+        return mock_input
+
+
+def test_main_creates_clone_dir_on_approval(tmp_path):
+    mock_input = _run_fix_mode(tmp_path, [])
+    mock_input.assert_called_once()
+    prompt = mock_input.call_args.args[0]
+    assert "clone_dir" in prompt and "config.yaml" in prompt
+    assert (tmp_path / "clones").is_dir()
+
+
+def test_main_aborts_without_clone_dir_approval(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("org: test-org\n")
+    with patch("src.main.load_config") as mock_config, \
+         patch("src.main.GitHubClient") as mock_client_cls, \
+         patch("src.main.list_repos", return_value=[]), \
+         patch("src.main.webbrowser"), \
+         patch("src.main.generate_report", return_value="<html></html>"), \
+         patch("builtins.input", return_value="n"):
+        mock_config.return_value = _fix_mode_config(tmp_path)
+        mock_client_cls.return_value = MagicMock()
+        with pytest.raises(SystemExit):
+            main(["--config", str(config_path)])
+    assert not (tmp_path / "clones").exists()
+
+
+def test_main_yes_skips_clone_dir_prompt(tmp_path):
+    mock_input = _run_fix_mode(tmp_path, ["--yes"])
+    mock_input.assert_not_called()
+    assert (tmp_path / "clones").is_dir()

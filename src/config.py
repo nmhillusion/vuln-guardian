@@ -30,7 +30,7 @@ def load_config(config_path: str = "config.yaml") -> Config:
 
     return Config(
         org=data.get("org", ""),
-        clone_dir=data.get("clone_dir", ".repos"),
+        clone_dir=data.get("clone_dir", "../.repos"),
         report_path=data.get("report_path", "report.html"),
         ai_agent_args=data.get("ai_agent_args", ["kilo", "run", "--auto", "{prompt}"]),
         ai_agent_model=data.get("ai_agent_model", ""),

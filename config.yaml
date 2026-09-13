@@ -1,5 +1,5 @@
 org: "nmhillusion"
-clone_dir: ".repos"
+clone_dir: "../.repos"
 report_path: "report.html"
 ai_agent_args: ["C:\\Workspace\\programs\\code\\node-v24\\kilo.cmd", "run", "--auto", "-m", "{model}", "{prompt}"]
 ai_agent_model: "kilo/nex-agi/nex-n2.5-pro:free"
