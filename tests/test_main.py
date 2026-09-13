@@ -23,6 +23,7 @@ def test_color_formatter_banners_magenta():
     f = _ColorFormatter("%(message)s", use_color=True)
     assert f.format(_record(logging.INFO, "===== START fix X =====")).startswith("\x1b[35m")
     assert f.format(_record(logging.INFO, "regular line")).startswith("\x1b[32m")
+    assert f.format(_record(logging.INFO, "SKIP o/r — nothing")).startswith("\x1b[38;5;208m")
     plain = _ColorFormatter("%(message)s", use_color=False)
     assert plain.format(_record(logging.INFO, "===== START fix X =====")) == "===== START fix X ====="
 

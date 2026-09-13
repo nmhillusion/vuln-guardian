@@ -44,6 +44,8 @@ class _ColorFormatter(logging.Formatter):
         color = self.COLORS.get(record.levelno, "")
         if record.getMessage().startswith("====="):
             color = "\033[35m"  # magenta for START/END fix banners
+        elif record.getMessage().startswith("SKIP"):
+            color = "\033[38;5;208m"  # orange for SKIP lines
         return f"{color}{text}{self.RESET}"
 
 
@@ -90,11 +92,21 @@ def _batch_branch_name(batch: list[Vulnerability]) -> str:
     return f"fix/batch-{digest}"
 
 
-def _record_skip(result: RunResult, repo_full_name: str, vulns: list[Vulnerability], reason: str) -> None:
+def _record_skip(
+    result: RunResult,
+    repo_full_name: str,
+    vulns: list[Vulnerability],
+    reason: str,
+    branch: str | None = None,
+) -> None:
     """Count a skip and record what was skipped for the report."""
     result.skipped += len(vulns)
     for v in vulns:
-        result.skipped_items.append({"repo": repo_full_name, "advisory_id": v.advisory_id, "reason": reason})
+        item: dict[str, str] = {"repo": repo_full_name, "advisory_id": v.advisory_id, "reason": reason}
+        if branch:
+            item["branch"] = branch
+            item["url"] = f"https://github.com/{repo_full_name}/tree/{branch}"
+        result.skipped_items.append(item)
 
 
 def process_repo(
@@ -150,7 +162,7 @@ def process_repo(
 
         if branch_exists(repo_path, branch_name):
             logger.info(f"Branch {branch_name} already exists, skipping batch")
-            _record_skip(result, repo_full_name, batch, "batch branch already exists")
+            _record_skip(result, repo_full_name, batch, "batch branch already exists", branch=branch_name)
             continue
 
         try:

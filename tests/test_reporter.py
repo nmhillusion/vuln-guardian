@@ -49,6 +49,21 @@ def test_generate_report_lists_skipped_items(tmp_path):
     assert "GHSA-2" in html and "no fix produced" in html
 
 
+def test_generate_report_skipped_branch_link(tmp_path):
+    result = RunResult(
+        repos_scanned=1,
+        vulns_found=1,
+        skipped=1,
+        skipped_items=[
+            {"repo": "o/r", "advisory_id": "GHSA-1", "reason": "batch branch already exists",
+             "branch": "fix/batch-abc123", "url": "https://github.com/o/r/tree/fix/batch-abc123"},
+        ],
+    )
+    report_path = str(tmp_path / "test_report.html")
+    html = generate_report(result, report_path)
+    assert '<a href="https://github.com/o/r/tree/fix/batch-abc123">fix/batch-abc123</a>' in html
+
+
 def test_generate_report_lists_pending_prs(tmp_path):
     result = RunResult(
         repos_scanned=1,

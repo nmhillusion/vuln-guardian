@@ -330,6 +330,21 @@ def test_run_agent_streaming_stdin_roundtrip(tmp_path):
     assert f"GOT:{len(big)}" in output
 
 
+def test_apply_fix_trims_long_descriptions(tmp_path):
+    config = _make_config()
+    vuln = _make_vuln()
+    vuln.description = "x" * 2000
+    with patch("subprocess.Popen") as mock_popen, patch("subprocess.run") as mock_run:
+        mock_popen.return_value = _fake_proc()
+        mock_run.return_value = MagicMock(returncode=0)
+        with patch("src.fixer._has_changes", return_value=True):
+            apply_fix(config, tmp_path, [vuln])
+    prompt = _prompt_of_last_agent_call(mock_popen, config)
+    assert "[truncated]" in prompt
+    assert "x" * 2000 not in prompt
+    assert "at most about 10 tool calls" in prompt
+
+
 def test_apply_fix_no_subagents_rule(tmp_path):
     config = _make_config()
     vuln = _make_vuln()
@@ -378,6 +393,40 @@ def test_apply_fix_cannot_fix_marker_reported(tmp_path, caplog):
     assert result is False
     assert "Agent cannot fix batch [GHSA-test-1234]: parent has no fixed release" in caplog.text
     assert "NO FIX — cannot fix: parent has no fixed release" in caplog.text
+
+
+def test_apply_fix_repo_dir_substituted(tmp_path):
+    config = _make_config(ai_agent_args=["kilo", "run", "--auto", "--dir", "{repo_dir}", "{prompt}"])
+    vuln = _make_vuln()
+    with patch("subprocess.Popen") as mock_popen, patch("subprocess.run") as mock_run:
+        mock_popen.return_value = _fake_proc()
+        mock_run.return_value = MagicMock(returncode=0)
+        with patch("src.fixer._has_changes", return_value=True):
+            apply_fix(config, tmp_path, [vuln])
+    cmd = mock_popen.call_args.args[0]
+    assert "--dir" in cmd
+    assert str(tmp_path) in cmd
+    assert cmd[cmd.index("--dir") + 1] == str(tmp_path)
+
+
+def test_apply_fix_parent_version_in_rule(tmp_path):
+    config = _make_config()
+    vuln = _make_dep_vuln()
+    vuln.parent_version = "9.3.0"
+    vuln.dependency_chain = [
+        "pkg:github/o/r@main",
+        "org.owasp:dependency-check-core@9.2.0",
+        "com.h2database:h2@2.1.214",
+    ]
+    vuln.package_name = "com.h2database:h2"
+    vuln.patched_version = "2.2.220"
+    with patch("subprocess.Popen") as mock_popen, patch("subprocess.run") as mock_run:
+        mock_popen.return_value = _fake_proc()
+        mock_run.return_value = MagicMock(returncode=0)
+        with patch("src.fixer._has_changes", return_value=True):
+            apply_fix(config, tmp_path, [vuln])
+    prompt = _prompt_of_last_agent_call(mock_popen, config)
+    assert "Upgrade the direct parent org.owasp:dependency-check-core@9.2.0 to version 9.3.0 (latest release)" in prompt
 
 
 def test_apply_fix_streams_agent_output_to_log(tmp_path, caplog):

@@ -180,11 +180,14 @@ def _build_skipped_section(result: RunResult) -> str:
         return f'<div class="empty">{result.skipped} vulnerability fix(es) skipped.</div>'
     rows = ""
     for item in result.skipped_items:
+        reason = item.get("reason", "")
+        if item.get("branch") and item.get("url"):
+            reason += f' (<a href="{item["url"]}">{item["branch"]}</a>)'
         rows += (
             f'<tr>'
             f'<td>{item.get("repo", "")}</td>'
             f'<td>{item.get("advisory_id", "")}</td>'
-            f'<td>{item.get("reason", "")}</td>'
+            f'<td>{reason}</td>'
             f'</tr>\n'
         )
     return (

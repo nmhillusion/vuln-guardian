@@ -146,3 +146,46 @@ def test_fetch_repo_advisories_resolves_transitive_chain():
     assert len(vulns) == 1
     assert vulns[0].ecosystem == "maven"
     assert vulns[0].dependency_chain == ["pkg:github/o/r@main", "com.h2database:h2@2.1.214"]
+
+
+def test_fetch_repo_advisories_resolves_parent_version():
+    client = MagicMock()
+    alert = {
+        "number": 12,
+        "security_advisory": {"ghsa_id": "GHSA-x", "severity": "high",
+                              "summary": "S", "description": "D"},
+        "security_vulnerability": {
+            "package": {"name": "com.h2database:h2", "ecosystem": "maven"},
+            "vulnerable_version_range": "< 2.2.220",
+            "first_patched_version": {"identifier": "2.2.220"},
+        },
+        "dependency": {"manifest_path": "settings.gradle.kts", "scope": None,
+                       "relationship": "transitive"},
+        "state": "open",
+    }
+    client.get_paginated.side_effect = [[alert], [], []]
+    sbom = {
+        "packages": [
+            {"SPDXID": "SPDXRef-R", "name": "r",
+             "externalRefs": [{"referenceType": "purl", "referenceLocator": "pkg:github/o/r@main"}]},
+            {"SPDXID": "SPDXRef-P", "name": "p",
+             "externalRefs": [{"referenceType": "purl",
+                               "referenceLocator": "pkg:maven/org.owasp/dependency-check-core@9.2.0"}]},
+            {"SPDXID": "SPDXRef-H", "name": "h",
+             "externalRefs": [{"referenceType": "purl",
+                               "referenceLocator": "pkg:maven/com.h2database/h2@2.1.214"}]},
+        ],
+        "relationships": [
+            {"spdxElementId": "SPDXRef-DOCUMENT", "relatedSpdxElement": "SPDXRef-R",
+             "relationshipType": "DESCRIBES"},
+            {"spdxElementId": "SPDXRef-R", "relatedSpdxElement": "SPDXRef-P",
+             "relationshipType": "DEPENDS_ON"},
+            {"spdxElementId": "SPDXRef-P", "relatedSpdxElement": "SPDXRef-H",
+             "relationshipType": "DEPENDS_ON"},
+        ],
+    }
+    with patch("src.fetcher.fetch_sbom", return_value=sbom), \
+         patch("src.fetcher.get_latest_version", return_value="9.3.0") as mock_latest:
+        vulns = fetch_repo_advisories(client, "test-org/repo1")
+    mock_latest.assert_called_once_with("org.owasp", "dependency-check-core")
+    assert vulns[0].parent_version == "9.3.0"

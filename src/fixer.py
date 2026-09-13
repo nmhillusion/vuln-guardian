@@ -26,6 +26,9 @@ _BASE_FIX_PROMPT = (
     "action is outside the approved scope. "
     "Do not spawn subagents or delegate work to other agents — "
     "perform all investigation, edits, and verification directly yourself in this session. "
+    "Act after minimal investigation; use at most about 10 tool calls; "
+    "skip builds and tests unless your edit touches build logic. "
+    "Do not inspect wrapper or build-infrastructure files (gradle-wrapper.properties, CI configs, repository settings). "
 )
 
 _TRANSITIVE_DEP_RULE = (
@@ -89,6 +92,7 @@ def _agent_label(ai_agent_args: list[str], configured_model: str = "") -> str:
 _SNIPPET_CONTEXT_LINES = 3
 _SNIPPET_MAX_MATCHES = 2
 _SNIPPET_MAX_LINE_LEN = 200
+_MAX_DESC_CHARS = 1500
 
 
 def _format_snippet(all_lines: list[str], match_idx: int) -> str:
@@ -251,6 +255,9 @@ def _prepare_vuln(repo_path: Path, vuln: Vulnerability) -> tuple[str, str]:
         vuln.introduced_at = _read_code_snippet(repo_path, vuln.affected_files[0], vuln.start_line)
 
     affected = ", ".join(vuln.affected_files) if vuln.affected_files else "affected files"
+    description = vuln.description
+    if len(description) > _MAX_DESC_CHARS:
+        description = description[:_MAX_DESC_CHARS] + "... [truncated]"
     suggestion = ""
     if vuln.package_name and vuln.patched_version:
         suggestion = f"GitHub recommends upgrading {vuln.package_name} to version {vuln.patched_version}"
@@ -259,7 +266,7 @@ def _prepare_vuln(repo_path: Path, vuln: Vulnerability) -> tuple[str, str]:
     section = (
         f"--- Vulnerability {vuln.advisory_id}: {vuln.title} ---\n"
         f"Affected files: {affected}. "
-        f"{vuln.description}"
+        f"{description}"
     )
     if suggestion:
         section += f" {suggestion}"
@@ -271,12 +278,14 @@ def _prepare_vuln(repo_path: Path, vuln: Vulnerability) -> tuple[str, str]:
         pkg = vuln.package_name
         parent = vuln.dependency_chain[-2] if vuln.dependency_chain and len(vuln.dependency_chain) >= 2 else None
         who = f"the direct parent {parent}" if parent else "the direct dependency that introduces it"
-        if vuln.patched_version:
-            target = f" to a version that includes fixed {pkg} {vuln.patched_version}"
+        if vuln.parent_version and parent:
+            action = f"Upgrade {who} to version {vuln.parent_version} (latest release)"
+        elif vuln.patched_version:
+            action = f"Upgrade {who} to a version that includes fixed {pkg} {vuln.patched_version}"
         else:
-            target = " to a fixed version"
+            action = f"Upgrade {who} to a fixed version"
         fix_instruction = (
-            f"Upgrade {who}{target}. "
+            f"{action}. "
             f"Do NOT add {pkg} as a new direct dependency. "
             f"If no version of {who} includes the fix, STOP immediately — "
             f"do not try alternative fixes and do not edit other files. "
@@ -410,6 +419,9 @@ def _apply_fix_inner(
         if a == "{prompt}":
             if not config.ai_agent_stdin:
                 cmd.append(prompt)
+            continue
+        if a == "{repo_dir}":
+            cmd.append(str(repo_path))
             continue
         if a == "{model}":
             if config.ai_agent_model:

@@ -17,6 +17,7 @@ class Vulnerability:
     state: str  # "open" | "dismissed" | "fixed"
     ecosystem: str | None = None  # "maven" | "npm" | ...
     dependency_chain: list[str] | None = None  # root -> ... -> package
+    parent_version: str | None = None  # latest release of the direct parent
     patched_version: str | None = None  # first version containing a fix
     vulnerable_range: str | None = None  # e.g. "< 4.17.21"
     manifest_path: str | None = None  # e.g. "backend/pom.xml"

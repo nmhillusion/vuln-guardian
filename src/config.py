@@ -12,7 +12,7 @@ class Config:
     clone_dir: str
     report_path: str
     github_pat: str
-    ai_agent_args: list[str] = field(default_factory=lambda: ["kilo", "run", "--auto", "{prompt}"])
+    ai_agent_args: list[str] = field(default_factory=lambda: ["kilo", "run", "--auto", "--dir", "{repo_dir}", "{prompt}"])
     ai_agent_model: str = ""
     ai_agent_stdin: bool = False
 
@@ -33,7 +33,7 @@ def load_config(config_path: str = "config.yaml") -> Config:
         org=data.get("org", ""),
         clone_dir=data.get("clone_dir", "../.repos"),
         report_path=data.get("report_path", "report.html"),
-        ai_agent_args=data.get("ai_agent_args", ["kilo", "run", "--auto", "{prompt}"]),
+        ai_agent_args=data.get("ai_agent_args", ["kilo", "run", "--auto", "--dir", "{repo_dir}", "{prompt}"]),
         ai_agent_model=data.get("ai_agent_model", ""),
         ai_agent_stdin=bool(data.get("ai_agent_stdin", False)),
         github_pat=github_pat,

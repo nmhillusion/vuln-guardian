@@ -9,6 +9,7 @@ if TYPE_CHECKING:
 
 from src.models import Vulnerability
 from src.sbom import fetch_sbom, find_chain
+from src.maven import get_latest_version, parse_maven_parent
 
 logger = logging.getLogger(__name__)
 
@@ -115,11 +116,24 @@ def fetch_repo_advisories(client: GitHubClient, repo_full_name: str) -> list[Vul
     if transitives:
         sbom = fetch_sbom(client, repo_full_name)
         if sbom:
+            latest_cache: dict[tuple[str, str], str | None] = {}
             for v in transitives:
                 assert v.ecosystem is not None and v.package_name is not None
                 v.dependency_chain = find_chain(sbom, v.ecosystem, v.package_name)
                 if v.dependency_chain:
                     logger.info(f"Chain for {v.package_name}: {' -> '.join(v.dependency_chain)}")
+                if (
+                    v.ecosystem == "maven"
+                    and v.dependency_chain
+                    and len(v.dependency_chain) >= 2
+                ):
+                    parsed = parse_maven_parent(v.dependency_chain[-2])
+                    if parsed:
+                        if parsed not in latest_cache:
+                            latest_cache[parsed] = get_latest_version(*parsed)
+                        v.parent_version = latest_cache[parsed]
+                        if v.parent_version:
+                            logger.info(f"Latest {parsed[0]}:{parsed[1]}: {v.parent_version}")
     return vulns
 
 
