@@ -56,3 +56,49 @@ def test_parse_code_scanning_alerts():
     assert len(result) == 1
     assert result[0].advisory_id == "CS-42"
     assert result[0].affected_files == ["src/app.py"]
+
+
+def test_parse_dependabot_alerts_enriched():
+    alerts = [
+        {
+            "number": 7,
+            "security_advisory": {
+                "ghsa_id": "GHSA-dep-9999",
+                "severity": "critical",
+                "summary": "RCE in jackson",
+                "description": "desc",
+            },
+            "security_vulnerability": {
+                "package": {"name": "com.fasterxml.jackson.core:jackson-core", "ecosystem": "maven"},
+                "vulnerable_version_range": "< 2.18.4.2",
+                "first_patched_version": {"identifier": "2.18.4.2"},
+            },
+            "dependency": {
+                "manifest_path": "backend/pom.xml",
+                "scope": "runtime",
+                "relationship": "transitive",
+            },
+            "state": "open",
+        }
+    ]
+    result = _parse_dependabot_alerts("test-org/repo1", alerts)
+    assert len(result) == 1
+    assert result[0].patched_version == "2.18.4.2"
+    assert result[0].vulnerable_range == "< 2.18.4.2"
+    assert result[0].manifest_path == "backend/pom.xml"
+    assert result[0].dependency_relationship == "transitive"
+    assert result[0].dependency_scope == "runtime"
+
+
+def test_parse_code_scanning_alerts_lines():
+    alerts = [
+        {
+            "number": 43,
+            "rule": {"description": "XSS", "security_severity_level": "medium"},
+            "location": {"path": "src/view.py", "start_line": 12, "end_line": 15},
+            "state": "open",
+        }
+    ]
+    result = _parse_code_scanning_alerts("test-org/repo1", alerts)
+    assert result[0].start_line == 12
+    assert result[0].end_line == 15

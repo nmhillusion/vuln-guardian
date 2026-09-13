@@ -32,6 +32,8 @@ def _parse_dependabot_alerts(repo_full_name: str, alerts: list[dict]) -> list[Vu
         advisory = alert.get("security_advisory", {})
         vuln_info = alert.get("security_vulnerability", {})
         package = vuln_info.get("package", {})
+        dependency = alert.get("dependency", {}) or {}
+        first_patched = vuln_info.get("first_patched_version") or {}
         vulns.append(
             Vulnerability(
                 repo_full_name=repo_full_name,
@@ -43,6 +45,11 @@ def _parse_dependabot_alerts(repo_full_name: str, alerts: list[dict]) -> list[Vu
                 package_name=package.get("name"),
                 source="dependabot",
                 state="open",
+                patched_version=first_patched.get("identifier"),
+                vulnerable_range=vuln_info.get("vulnerable_version_range"),
+                manifest_path=dependency.get("manifest_path"),
+                dependency_relationship=dependency.get("relationship"),
+                dependency_scope=dependency.get("scope"),
             )
         )
     return vulns
@@ -55,7 +62,7 @@ def _parse_code_scanning_alerts(repo_full_name: str, alerts: list[dict]) -> list
         if alert.get("state") != "open":
             continue
         rule = alert.get("rule", {})
-        location = alert.get("location", {})
+        location = alert.get("location", {}) or {}
         file_path = location.get("path", "")
         vulns.append(
             Vulnerability(
@@ -68,6 +75,8 @@ def _parse_code_scanning_alerts(repo_full_name: str, alerts: list[dict]) -> list
                 package_name=None,
                 source="code_scanning",
                 state="open",
+                start_line=location.get("start_line"),
+                end_line=location.get("end_line"),
             )
         )
     return vulns
