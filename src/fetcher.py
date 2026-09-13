@@ -13,9 +13,14 @@ logger = logging.getLogger(__name__)
 
 
 def _get_org_repos(client: GitHubClient, org: str) -> list[str]:
-    """Get all repos for an org, return list of full_name strings."""
-    repos = client.get_paginated(f"/orgs/{org}/repos")
-    return [repo["full_name"] for repo in repos]
+    """Get all repos for an org or user, return list of full_name strings."""
+    try:
+        repos = client.get_paginated(f"/orgs/{org}/repos")
+        return [repo["full_name"] for repo in repos]
+    except Exception:
+        logger.info(f"Not an org, trying as user: {org}")
+        repos = client.get_paginated(f"/users/{org}/repos")
+        return [repo["full_name"] for repo in repos]
 
 
 def _parse_dependabot_alerts(repo_full_name: str, alerts: list[dict]) -> list[Vulnerability]:
@@ -68,6 +73,32 @@ def _parse_code_scanning_alerts(repo_full_name: str, alerts: list[dict]) -> list
     return vulns
 
 
+def list_repos(client: GitHubClient, org: str) -> list[str]:
+    """List all repo full names for an org or user."""
+    return _get_org_repos(client, org)
+
+
+def fetch_repo_advisories(client: GitHubClient, repo_full_name: str) -> list[Vulnerability]:
+    """Fetch all open advisories (Dependabot, Code Scanning, GHSA) for a single repo."""
+    vulns: list[Vulnerability] = []
+    logger.info(f"Scanning {repo_full_name}...")
+
+    try:
+        dependabot_alerts = client.get_paginated(f"/repos/{repo_full_name}/dependabot/alerts")
+        vulns.extend(_parse_dependabot_alerts(repo_full_name, dependabot_alerts))
+    except Exception as e:
+        logger.warning(f"Failed to fetch Dependabot alerts for {repo_full_name}: {e}")
+
+    try:
+        code_scanning_alerts = client.get_paginated(f"/repos/{repo_full_name}/code-scanning/alerts")
+        vulns.extend(_parse_code_scanning_alerts(repo_full_name, code_scanning_alerts))
+    except Exception as e:
+        logger.warning(f"Failed to fetch Code Scanning alerts for {repo_full_name}: {e}")
+
+    vulns.extend(_parse_ghsa_for_repo(client, repo_full_name))
+    return vulns
+
+
 def _parse_ghsa_for_repo(client: GitHubClient, repo_full_name: str) -> list[Vulnerability]:
     """Fetch GHSA advisories that affect a specific repo."""
     vulns = []
@@ -95,25 +126,16 @@ def _parse_ghsa_for_repo(client: GitHubClient, repo_full_name: str) -> list[Vuln
 def fetch_all_advisories(client: GitHubClient, org: str) -> list[Vulnerability]:
     """Fetch all open advisories from GHSA, Dependabot, and Code Scanning for an org."""
     all_vulns: list[Vulnerability] = []
-    repos = _get_org_repos(client, org)
+    try:
+        repos = list_repos(client, org)
+    except Exception as e:
+        logger.error(f"Failed to fetch repos for org {org}: {e}")
+        logger.error("Check your GITHUB_PAT has 'repo' and 'security_events' scopes")
+        return []
     logger.info(f"Found {len(repos)} repos in org {org}")
 
     for repo_full_name in repos:
-        logger.info(f"Scanning {repo_full_name}...")
-
-        try:
-            dependabot_alerts = client.get_paginated(f"/repos/{repo_full_name}/dependabot/alerts")
-            all_vulns.extend(_parse_dependabot_alerts(repo_full_name, dependabot_alerts))
-        except Exception as e:
-            logger.warning(f"Failed to fetch Dependabot alerts for {repo_full_name}: {e}")
-
-        try:
-            code_scanning_alerts = client.get_paginated(f"/repos/{repo_full_name}/code-scanning/alerts")
-            all_vulns.extend(_parse_code_scanning_alerts(repo_full_name, code_scanning_alerts))
-        except Exception as e:
-            logger.warning(f"Failed to fetch Code Scanning alerts for {repo_full_name}: {e}")
-
-        all_vulns.extend(_parse_ghsa_for_repo(client, repo_full_name))
+        all_vulns.extend(fetch_repo_advisories(client, repo_full_name))
 
     logger.info(f"Total vulnerabilities found: {len(all_vulns)}")
     return all_vulns

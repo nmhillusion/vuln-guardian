@@ -8,7 +8,7 @@ from src.models import Vulnerability, RunResult
 def test_full_dry_run_pipeline(tmp_path):
     """Test: fetch advisories -> generate report, no clone/fix/PR."""
     config_path = tmp_path / "config.yaml"
-    config_path.write_text('org: "test-org"\nclone_dir: ".repos"\nreport_path: "report.html"\nopencode_binary: "opencode"\n')
+    config_path.write_text('org: "test-org"\nclone_dir: ".repos"\nreport_path: "report.html"\nai_agent_args: ["kilo", "run", "--auto", "{prompt}"]\n')
 
     vulns = [
         Vulnerability(
@@ -37,14 +37,15 @@ def test_full_dry_run_pipeline(tmp_path):
 
     with patch("src.main.load_config") as mock_config, \
          patch("src.main.GitHubClient") as mock_client_cls, \
-         patch("src.main.fetch_all_advisories", return_value=vulns), \
+         patch("src.main.list_repos", return_value=["test-org/repo1", "test-org/repo2"]), \
+         patch("src.main.fetch_repo_advisories", side_effect=[[vulns[0]], [vulns[1]]]), \
          patch("src.main.generate_report") as mock_report:
         from src.config import Config
         mock_config.return_value = Config(
             org="test-org",
             clone_dir=str(tmp_path / ".repos"),
             report_path=str(tmp_path / "report.html"),
-            opencode_binary="opencode",
+            ai_agent_args=["kilo", "run", "--auto", "{prompt}"],
             github_pat="ghp_test",
         )
         mock_client_cls.return_value = MagicMock()

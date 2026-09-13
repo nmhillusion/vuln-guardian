@@ -1,6 +1,6 @@
 # src/config.py
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -11,8 +11,9 @@ class Config:
     org: str
     clone_dir: str
     report_path: str
-    opencode_binary: str
     github_pat: str
+    ai_agent_args: list[str] = field(default_factory=lambda: ["kilo", "run", "--auto", "{prompt}"])
+    ai_agent_model: str = ""
 
 
 def load_config(config_path: str = "config.yaml") -> Config:
@@ -23,14 +24,15 @@ def load_config(config_path: str = "config.yaml") -> Config:
     with open(path) as f:
         data = yaml.safe_load(f)
 
-    github_pat = os.environ.get("GITHUB_PAT")
+    github_pat = os.environ.get("GITHUB_PAT") or os.environ.get("GITHUB_TOKEN")
     if not github_pat:
-        raise ValueError("GITHUB_PAT environment variable is required")
+        raise ValueError("GITHUB_PAT or GITHUB_TOKEN environment variable is required")
 
     return Config(
         org=data.get("org", ""),
         clone_dir=data.get("clone_dir", ".repos"),
         report_path=data.get("report_path", "report.html"),
-        opencode_binary=data.get("opencode_binary", "opencode"),
+        ai_agent_args=data.get("ai_agent_args", ["kilo", "run", "--auto", "{prompt}"]),
+        ai_agent_model=data.get("ai_agent_model", ""),
         github_pat=github_pat,
     )

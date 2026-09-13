@@ -9,7 +9,7 @@ from pathlib import Path
 
 from src.config import load_config, Config
 from src.github_client import GitHubClient
-from src.fetcher import fetch_all_advisories
+from src.fetcher import list_repos, fetch_repo_advisories
 from src.models import RunResult, Vulnerability
 from src.repo import clone_or_update, detect_default_branch, branch_exists, create_branch, checkout
 from src.fixer import apply_fix
@@ -26,6 +26,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--org", type=str, default=None, help="Override org from config")
     parser.add_argument("--config", type=str, default="config.yaml", help="Path to config file")
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
+    parser.add_argument("--max-fixes", type=int, default=5, help="Max fix attempts per run (default: 5)")
     return parser.parse_args(argv)
 
 
@@ -35,12 +36,13 @@ def process_repo(
     repo_full_name: str,
     vulns: list[Vulnerability],
     result: RunResult,
+    max_fixes: int = 5,
 ) -> None:
     """Process all vulnerabilities for a single repo."""
     logger.info(f"Processing {repo_full_name} ({len(vulns)} vulnerabilities)...")
 
     try:
-        repo_path = clone_or_update(config.clone_dir, repo_full_name)
+        repo_path = clone_or_update(config.clone_dir, repo_full_name, config.github_pat)
     except Exception as e:
         msg = f"Failed to clone/update {repo_full_name}: {e}"
         logger.error(msg)
@@ -51,6 +53,10 @@ def process_repo(
     logger.info(f"Default branch for {repo_full_name}: {default_branch}")
 
     for vuln in vulns:
+        if result.fixes_attempted >= max_fixes:
+            logger.info(f"Reached max fix attempts ({max_fixes}), stopping")
+            break
+
         branch_name = f"fix/{vuln.advisory_id}"
 
         if pr_exists_for_branch(client, repo_full_name, branch_name):
@@ -84,6 +90,8 @@ def process_repo(
             ["git", "-C", str(repo_path), "push", "-u", "origin", branch_name],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         if push_result.returncode != 0:
             msg = f"Failed to push {branch_name}: {push_result.stderr}"
@@ -114,6 +122,7 @@ def main(argv: list[str] | None = None) -> None:
     logging.basicConfig(
         level=log_level,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        force=True,
     )
 
     try:
@@ -129,24 +138,27 @@ def main(argv: list[str] | None = None) -> None:
 
     try:
         logger.info(f"Fetching advisories for org: {config.org}")
-        vulns = fetch_all_advisories(client, config.org)
+        repos = list_repos(client, config.org)
+        logger.info(f"Found {len(repos)} repos in org {config.org}")
 
         result = RunResult()
-        result.vulns_found = len(vulns)
+        result.repos_scanned = len(repos)
 
-        if args.dry_run:
-            logger.info("Dry run mode — skipping clone/fix/PR")
-        elif args.report_only:
-            logger.info("Report-only mode — skipping clone/fix/PR")
-        else:
-            vulns_by_repo: dict[str, list[Vulnerability]] = {}
-            for v in vulns:
-                vulns_by_repo.setdefault(v.repo_full_name, []).append(v)
+        for repo_full_name in repos:
+            vulns = fetch_repo_advisories(client, repo_full_name)
+            result.vulns_found += len(vulns)
 
-            result.repos_scanned = len(vulns_by_repo)
+            if not vulns or args.dry_run or args.report_only:
+                if args.dry_run:
+                    logger.info("Dry run mode — skipping clone/fix/PR")
+                elif args.report_only:
+                    logger.info("Report-only mode — skipping clone/fix/PR")
+                continue
 
-            for repo_full_name, repo_vulns in vulns_by_repo.items():
-                process_repo(client, config, repo_full_name, repo_vulns, result)
+            process_repo(client, config, repo_full_name, vulns, result, args.max_fixes)
+            if result.fixes_attempted >= args.max_fixes:
+                logger.info(f"Reached max fix attempts ({args.max_fixes}), stopping run")
+                break
 
         report_html = generate_report(result, config.report_path)
         logger.info(f"Report saved to {config.report_path}")
