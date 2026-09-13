@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import logging
 import subprocess
 import sys
@@ -52,8 +53,36 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
     parser.add_argument("--no-browser", action="store_true", help="Don't auto-open the HTML report")
     parser.add_argument("--no-color", action="store_true", help="Disable colored log output")
-    parser.add_argument("--max-fixes", type=int, default=5, help="Max fix attempts per run (default: 5)")
+    parser.add_argument("--max-fixes", type=int, default=5, help="Max fix batches per run (default: 5)")
+    parser.add_argument("--batch-size", type=int, default=5, help="Max vulnerabilities per fix batch/PR (default: 5)")
     return parser.parse_args(argv)
+
+
+def _vuln_file_key(vuln: Vulnerability) -> str:
+    """File a vuln belongs to: manifest, first affected file, or misc bucket."""
+    if vuln.manifest_path:
+        return vuln.manifest_path
+    if vuln.affected_files:
+        return vuln.affected_files[0]
+    return "__misc__"
+
+
+def _batch_vulns(vulns: list[Vulnerability], batch_size: int) -> list[list[Vulnerability]]:
+    """Group vulns by file and chunk into batches. Deterministic for stable resume."""
+    groups: dict[str, list[Vulnerability]] = {}
+    for v in sorted(vulns, key=lambda v: (_vuln_file_key(v), v.advisory_id)):
+        groups.setdefault(_vuln_file_key(v), []).append(v)
+    batches: list[list[Vulnerability]] = []
+    for key in sorted(groups):
+        group = groups[key]
+        batches.extend(group[i:i + batch_size] for i in range(0, len(group), batch_size))
+    return batches
+
+
+def _batch_branch_name(batch: list[Vulnerability]) -> str:
+    """Content-derived branch name so identical batches resume to the same branch."""
+    digest = hashlib.sha1(",".join(sorted(v.advisory_id for v in batch)).encode()).hexdigest()[:8]
+    return f"fix/batch-{digest}"
 
 
 def process_repo(
@@ -63,8 +92,9 @@ def process_repo(
     vulns: list[Vulnerability],
     result: RunResult,
     max_fixes: int = 5,
+    batch_size: int = 5,
 ) -> None:
-    """Process all vulnerabilities for a single repo."""
+    """Process all vulnerabilities for a single repo, in per-file batches."""
     logger.info(f"Processing {repo_full_name} ({len(vulns)} vulnerabilities)...")
 
     try:
@@ -78,21 +108,37 @@ def process_repo(
     default_branch = detect_default_branch(repo_path)
     logger.info(f"Default branch for {repo_full_name}: {default_branch}")
 
+    # Pre-filter vulns already handled (previous runs / one-by-one era branches).
+    pending: list[Vulnerability] = []
     for vuln in vulns:
+        legacy_branch = f"fix/{vuln.advisory_id}"
+        if pr_exists_for_branch(client, repo_full_name, legacy_branch):
+            logger.info(f"PR already exists for {vuln.advisory_id}, skipping")
+            result.skipped += 1
+            continue
+        if branch_exists(repo_path, legacy_branch):
+            logger.info(f"Branch {legacy_branch} already exists, skipping")
+            result.skipped += 1
+            continue
+        pending.append(vuln)
+
+    for batch in _batch_vulns(pending, batch_size):
         if result.fixes_attempted >= max_fixes:
             logger.info(f"Reached max fix attempts ({max_fixes}), stopping")
             break
 
-        branch_name = f"fix/{vuln.advisory_id}"
+        ids = sorted(v.advisory_id for v in batch)
+        branch_name = _batch_branch_name(batch)
+        logger.info(f"Batch {branch_name} ({len(batch)} vulns): {', '.join(ids)}")
 
         if pr_exists_for_branch(client, repo_full_name, branch_name):
-            logger.info(f"PR already exists for {vuln.advisory_id}, skipping")
-            result.skipped += 1
+            logger.info(f"PR already exists for {branch_name}, skipping batch")
+            result.skipped += len(batch)
             continue
 
         if branch_exists(repo_path, branch_name):
-            logger.info(f"Branch {branch_name} already exists, skipping")
-            result.skipped += 1
+            logger.info(f"Branch {branch_name} already exists, skipping batch")
+            result.skipped += len(batch)
             continue
 
         try:
@@ -105,9 +151,9 @@ def process_repo(
 
         result.fixes_attempted += 1
 
-        if not apply_fix(config, repo_path, vuln, fix_number=result.fixes_attempted, max_fixes=max_fixes):
-            logger.info(f"No fix applied for {vuln.advisory_id}, skipping PR")
-            result.skipped += 1
+        if not apply_fix(config, repo_path, batch, fix_number=result.fixes_attempted, max_fixes=max_fixes):
+            logger.info(f"No fix applied for batch {branch_name}, skipping PR")
+            result.skipped += len(batch)
             checkout(repo_path, default_branch)
             subprocess.run(["git", "-C", str(repo_path), "branch", "-D", branch_name], capture_output=True)
             continue
@@ -125,18 +171,19 @@ def process_repo(
             result.errors.append(msg)
             continue
 
-        pr = create_pull_request(client, repo_full_name, vuln, default_branch)
+        pr = create_pull_request(client, repo_full_name, batch, default_branch, branch_name)
         if pr:
             result.prs_created += 1
-            result.prs.append({
-                "repo": repo_full_name,
-                "advisory_id": vuln.advisory_id,
-                "severity": vuln.severity,
-                "title": vuln.title,
-                "pr_url": pr.get("html_url", ""),
-                "pr_number": pr.get("number", ""),
-                "merged": pr.get("merged", False),
-            })
+            for v in batch:
+                result.prs.append({
+                    "repo": repo_full_name,
+                    "advisory_id": v.advisory_id,
+                    "severity": v.severity,
+                    "title": v.title,
+                    "pr_url": pr.get("html_url", ""),
+                    "pr_number": pr.get("number", ""),
+                    "merged": pr.get("merged", False),
+                })
 
         checkout(repo_path, default_branch)
 
@@ -185,7 +232,7 @@ def main(argv: list[str] | None = None) -> None:
                 logger.info("Report-only mode — skipping clone/fix/PR")
                 continue
 
-            process_repo(client, config, repo_full_name, vulns, result, args.max_fixes)
+            process_repo(client, config, repo_full_name, vulns, result, args.max_fixes, args.batch_size)
             if result.fixes_attempted >= args.max_fixes:
                 logger.info(f"Reached max fix attempts ({args.max_fixes}), stopping run")
                 break

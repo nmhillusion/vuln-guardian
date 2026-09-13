@@ -1,6 +1,6 @@
 # tests/test_main.py
 from unittest.mock import patch, MagicMock
-from src.main import main
+from src.main import main, _batch_vulns, _batch_branch_name
 from src.models import Vulnerability
 
 
@@ -27,6 +27,46 @@ def test_main_dry_run(tmp_path):
         assert mock_browser.open.call_args.args[0].startswith("file://")
 
 
+def _batch_vuln(advisory_id, manifest=None, affected=None):
+    return Vulnerability(
+        repo_full_name="test-org/repo1",
+        advisory_id=advisory_id,
+        severity="high",
+        title=f"Title {advisory_id}",
+        description="desc",
+        affected_files=[affected] if affected else [],
+        package_name=None,
+        source="dependabot",
+        state="open",
+        manifest_path=manifest,
+    )
+
+
+def test_batch_vulns_groups_by_file_and_chunks():
+    vulns = [
+        _batch_vuln("GHSA-3", manifest="a/pom.xml"),
+        _batch_vuln("GHSA-1", manifest="a/pom.xml"),
+        _batch_vuln("GHSA-2", manifest="a/pom.xml"),
+        _batch_vuln("GHSA-4", manifest="b/package.json"),
+        _batch_vuln("GHSA-5"),
+    ]
+    batches = _batch_vulns(vulns, batch_size=2)
+    assert [[v.advisory_id for v in b] for b in batches] == [
+        ["GHSA-5"],
+        ["GHSA-1", "GHSA-2"],
+        ["GHSA-3"],
+        ["GHSA-4"],
+    ]
+
+
+def test_batch_branch_name_deterministic():
+    vulns = [_batch_vuln("GHSA-2"), _batch_vuln("GHSA-1")]
+    assert _batch_branch_name(vulns) == _batch_branch_name(list(reversed(vulns)))
+    assert _batch_branch_name(vulns).startswith("fix/batch-")
+    other = [_batch_vuln("GHSA-9")]
+    assert _batch_branch_name(vulns) != _batch_branch_name(other)
+
+
 def _make_vuln(repo, advisory_id):
     return Vulnerability(
         repo_full_name=repo,
@@ -46,7 +86,7 @@ def test_main_stops_after_max_fixes(tmp_path):
     config_path.write_text('org: "test-org"\nclone_dir: ".repos"\nreport_path: "report.html"\nai_agent_args: ["kilo", "run", "--auto", "{prompt}"]\n')
     repos = [f"test-org/repo{i}" for i in range(7)]
 
-    def fake_process_repo(client, config, repo_full_name, vulns, result, max_fixes=5):
+    def fake_process_repo(client, config, repo_full_name, vulns, result, max_fixes=5, batch_size=5):
         result.fixes_attempted += 1
 
     with patch("src.main.load_config") as mock_config, \

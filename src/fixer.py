@@ -198,27 +198,83 @@ def _run_agent_streaming(cmd: list[str], cwd: str, timeout: int, tag: str) -> tu
     return proc.returncode, "\n".join(out_lines)
 
 
-def _commit_lockfile_removal(repo_path: Path, manifest_path: str, advisory_id: str) -> bool:
-    """Delete a lockfile and commit the removal. Returns True if committed."""
-    lockfile = (repo_path / manifest_path).resolve()
-    if repo_path.resolve() not in lockfile.parents or not lockfile.is_file():
-        logger.warning(f"  Skipping lockfile delete: {manifest_path} is outside the repo or missing")
-        return False
-    lockfile.unlink()
-    logger.info(f"  Deleted {manifest_path} before invoking agent")
-    subprocess.run(["git", "-C", str(repo_path), "add", manifest_path], check=True)
+def _delete_lockfiles(repo_path: Path, manifest_paths: list[str]) -> list[str]:
+    """Delete lockfiles inside the repo. Returns manifests actually deleted."""
+    deleted: list[str] = []
+    repo_root = repo_path.resolve()
+    for manifest in dict.fromkeys(manifest_paths):
+        lockfile = (repo_path / manifest).resolve()
+        if repo_root not in lockfile.parents or not lockfile.is_file():
+            logger.warning(f"  Skipping lockfile delete: {manifest} is outside the repo or missing")
+            continue
+        lockfile.unlink()
+        logger.info(f"  Deleted {manifest} before invoking agent")
+        deleted.append(manifest)
+    return deleted
+
+
+def _commit_paths(repo_path: Path, paths: list[str], message: str) -> bool:
+    """Stage paths and commit. Returns True on success."""
+    subprocess.run(["git", "-C", str(repo_path), "add", "--", *paths], check=True)
     result = subprocess.run(
-        ["git", "-C", str(repo_path), "commit", "-m", f"fix: remove {manifest_path} ({advisory_id})"],
+        ["git", "-C", str(repo_path), "commit", "-m", message],
         capture_output=True,
         text=True,
         encoding="utf-8",
         errors="replace",
     )
-    if result.returncode != 0:
-        logger.warning(f"  Failed to commit lockfile removal for {advisory_id}")
-        return False
-    logger.info(f"  Lockfile-only fix for {advisory_id}: committed removal, skipping agent")
-    return True
+    return result.returncode == 0
+
+
+def _prepare_vuln(repo_path: Path, vuln: Vulnerability) -> tuple[str, str]:
+    """Compute snippet for one vuln. Returns (prompt section, suggestion)."""
+    if vuln.source == "dependabot" and vuln.manifest_path and vuln.package_name:
+        vuln.introduced_at = _find_manifest_lines(repo_path, vuln.manifest_path, vuln.package_name)
+    elif vuln.source == "code_scanning" and vuln.affected_files:
+        vuln.introduced_at = _read_code_snippet(repo_path, vuln.affected_files[0], vuln.start_line)
+
+    affected = ", ".join(vuln.affected_files) if vuln.affected_files else "affected files"
+    suggestion = ""
+    if vuln.package_name and vuln.patched_version:
+        suggestion = f"GitHub recommends upgrading {vuln.package_name} to version {vuln.patched_version}"
+        suggestion += f" (vulnerable range: {vuln.vulnerable_range})." if vuln.vulnerable_range else "."
+
+    section = (
+        f"--- Vulnerability {vuln.advisory_id}: {vuln.title} ---\n"
+        f"Affected files: {affected}. "
+        f"{vuln.description}"
+    )
+    if suggestion:
+        section += f" {suggestion}"
+    if vuln.manifest_path:
+        section += f" The dependency is declared in {vuln.manifest_path}."
+    if vuln.introduced_at:
+        section += f" Exact introducing location:\n{vuln.introduced_at}"
+    if vuln.dependency_relationship == "transitive" and vuln.package_name:
+        if vuln.patched_version:
+            fix_instruction = (
+                f"GitHub recommends version {vuln.patched_version}: "
+                f"pin {vuln.package_name} to that version as a direct dependency."
+            )
+        else:
+            fix_instruction = "Upgrade the direct dependency that introduces it to a fixed version."
+        section += _TRANSITIVE_DEP_RULE.format(package=vuln.package_name, fix_instruction=fix_instruction)
+    return section, suggestion
+
+
+def _log_vuln_detail(vuln: Vulnerability, suggestion: str) -> None:
+    logger.info(f"  [{vuln.advisory_id}] Severity: {vuln.severity} | Package: {vuln.package_name} | Source: {vuln.source}")
+    if vuln.dependency_relationship or vuln.dependency_scope or vuln.manifest_path:
+        logger.info(
+            f"  [{vuln.advisory_id}] Dependency: {vuln.dependency_relationship or '?'}"
+            f" | Scope: {vuln.dependency_scope or '?'}"
+            f" | Manifest: {vuln.manifest_path or '?'}"
+        )
+    logger.info(f"  [{vuln.advisory_id}] Title: {vuln.title}")
+    if suggestion:
+        logger.info(f"  [{vuln.advisory_id}] Suggestion: {suggestion}")
+    if vuln.introduced_at:
+        logger.info(f"  [{vuln.advisory_id}] Introduced at:\n{vuln.introduced_at}")
 
 
 def _fix_position(fix_number: int | None, max_fixes: int | None) -> str:
@@ -230,89 +286,86 @@ def _fix_position(fix_number: int | None, max_fixes: int | None) -> str:
 def apply_fix(
     config: Config,
     repo_path: Path,
-    vuln: Vulnerability,
+    vulns: list[Vulnerability],
     fix_number: int | None = None,
     max_fixes: int | None = None,
 ) -> bool:
-    """Fix a vulnerability, logging START/END banners. Returns True if fix applied."""
+    """Fix a batch of vulnerabilities, logging START/END banners. Returns True if fix applied."""
+    ids = ", ".join(v.advisory_id for v in vulns)
     position = _fix_position(fix_number, max_fixes)
-    logger.info(f"===== START fix {vuln.advisory_id}{position} =====")
-    ok = _apply_fix_inner(config, repo_path, vuln, fix_number, max_fixes)
-    logger.info(f"===== END fix {vuln.advisory_id}{position}: {'FIXED' if ok else 'NO FIX'} =====")
+    logger.info(f"===== START fix batch [{ids}]{position} =====")
+    ok = _apply_fix_inner(config, repo_path, vulns, fix_number, max_fixes)
+    logger.info(f"===== END fix batch [{ids}]{position}: {'FIXED' if ok else 'NO FIX'} =====")
     return ok
 
 
 def _apply_fix_inner(
     config: Config,
     repo_path: Path,
-    vuln: Vulnerability,
+    vulns: list[Vulnerability],
     fix_number: int | None = None,
     max_fixes: int | None = None,
 ) -> bool:
-    """Invoke agent CLI to fix a vulnerability. Returns True if fix applied."""
-    affected = ", ".join(vuln.affected_files) if vuln.affected_files else "affected files"
+    """Invoke agent CLI to fix a batch of vulnerabilities. Returns True if fix applied."""
+    if not vulns:
+        return False
+    position = _fix_position(fix_number, max_fixes)
+    ids = [v.advisory_id for v in vulns]
+    tag = ",".join(ids)
 
     is_npm = _is_npm_project(repo_path)
-    npm_lockfile_case = bool(
-        is_npm and vuln.manifest_path and vuln.manifest_path.endswith("package-lock.json")
-    )
+    lockfile_vulns: list[Vulnerability] = []
+    agent_vulns: list[Vulnerability] = []
+    for v in vulns:
+        if is_npm and v.manifest_path and v.manifest_path.endswith("package-lock.json"):
+            v.introduced_at = None
+            lockfile_vulns.append(v)
+        else:
+            agent_vulns.append(v)
 
-    if npm_lockfile_case and vuln.manifest_path:
-        # Lockfile-only fix: delete + commit + PR via caller, no agent (saves tokens).
-        vuln.introduced_at = None
+    deleted: list[str] = []
+    lockfix_committed = False
+    if lockfile_vulns:
         try:
-            if _commit_lockfile_removal(repo_path, vuln.manifest_path, vuln.advisory_id):
-                return True
+            deleted = _delete_lockfiles(repo_path, [v.manifest_path for v in lockfile_vulns if v.manifest_path])
         except Exception as e:
-            logger.warning(f"  Lockfile-only fix failed for {vuln.advisory_id}: {e}, falling back to agent")
-    if not npm_lockfile_case:
-        if vuln.source == "dependabot" and vuln.manifest_path and vuln.package_name:
-            vuln.introduced_at = _find_manifest_lines(repo_path, vuln.manifest_path, vuln.package_name)
-        elif vuln.source == "code_scanning" and vuln.affected_files:
-            vuln.introduced_at = _read_code_snippet(repo_path, vuln.affected_files[0], vuln.start_line)
+            logger.warning(f"  Lockfile delete failed: {e}")
+            deleted = []
+        if deleted:
+            msg = f"fix: remove lockfile(s) [{', '.join(deleted)}] ({', '.join(v.advisory_id for v in lockfile_vulns)})"
+            try:
+                lockfix_committed = _commit_paths(repo_path, deleted, msg)
+            except Exception as e:
+                logger.warning(f"  Lockfile removal commit failed: {e}")
+                lockfix_committed = False
+            if lockfix_committed:
+                logger.info(f"  Lockfile-only fix committed for {', '.join(v.advisory_id for v in lockfile_vulns)}")
 
-    suggestion = ""
-    if vuln.package_name and vuln.patched_version:
-        suggestion = f"GitHub recommends upgrading {vuln.package_name} to version {vuln.patched_version}"
-        suggestion += f" (vulnerable range: {vuln.vulnerable_range})." if vuln.vulnerable_range else "."
+    if not agent_vulns:
+        if lockfix_committed:
+            return True
+        # Commit failed: let the agent handle these vulns (lockfile already deleted).
+        agent_vulns = lockfile_vulns
+        lockfile_vulns = []
 
     prompt = (
         _BASE_FIX_PROMPT
         + "You are an advanced programmer, and has a very strong security guard charactrer. "
-        + f"Fix security vulnerability {vuln.advisory_id}: {vuln.title}. "
-        + f"Affected files: {affected}. "
-        + f"{vuln.description}"
+        + f"Fix the following {len(agent_vulns)} security vulnerabilities in this repo. "
+        + "Fix ALL of them, then stop. "
     )
-    if suggestion:
-        prompt += f" {suggestion}"
-    if vuln.manifest_path:
-        prompt += f" The dependency is declared in {vuln.manifest_path}."
-    if vuln.introduced_at:
-        prompt += f" Exact introducing location:\n{vuln.introduced_at}"
-    if vuln.dependency_relationship == "transitive" and vuln.package_name:
-        if vuln.patched_version:
-            fix_instruction = (
-                f"GitHub recommends version {vuln.patched_version}: "
-                f"pin {vuln.package_name} to that version as a direct dependency."
-            )
-        else:
-            fix_instruction = "Upgrade the direct dependency that introduces it to a fixed version."
-        prompt += _TRANSITIVE_DEP_RULE.format(package=vuln.package_name, fix_instruction=fix_instruction)
-
-    position = _fix_position(fix_number, max_fixes)
-    logger.info(f"Invoking agent {_agent_label(config.ai_agent_args, config.ai_agent_model)} for {vuln.advisory_id}{position}...")
-    logger.info(f"  Severity: {vuln.severity} | Package: {vuln.package_name} | Source: {vuln.source}")
-    if vuln.dependency_relationship or vuln.dependency_scope or vuln.manifest_path:
-        logger.info(
-            f"  Dependency: {vuln.dependency_relationship or '?'}"
-            f" | Scope: {vuln.dependency_scope or '?'}"
-            f" | Manifest: {vuln.manifest_path or '?'}"
+    for v in agent_vulns:
+        section, suggestion = _prepare_vuln(repo_path, v)
+        prompt += "\n\n" + section
+        _log_vuln_detail(v, suggestion)
+    if deleted:
+        lock_ids = ", ".join(v.advisory_id for v in lockfile_vulns)
+        prompt += (
+            f"\n\nNote: {', '.join(deleted)} was already deleted to resolve {lock_ids}; "
+            "run the package manager to regenerate it with fixed versions. Do not restore old versions."
         )
-    logger.info(f"  Title: {vuln.title}")
-    if suggestion:
-        logger.info(f"  Suggestion: {suggestion}")
-    if vuln.introduced_at:
-        logger.info(f"  Introduced at:\n{vuln.introduced_at}")
+
+    logger.info(f"Invoking agent {_agent_label(config.ai_agent_args, config.ai_agent_model)} for batch [{tag}]{position}...")
 
     cmd: list[str] = []
     for a in config.ai_agent_args:
@@ -327,28 +380,28 @@ def _apply_fix_inner(
         cmd.append(prompt)
 
     try:
-        returncode, output = _run_agent_streaming(cmd, str(repo_path), _AGENT_TIMEOUT_SECONDS, vuln.advisory_id)
+        returncode, output = _run_agent_streaming(cmd, str(repo_path), _AGENT_TIMEOUT_SECONDS, tag)
     except Exception as e:
-        logger.warning(f"Agent failed to run for {vuln.advisory_id}: {e}")
+        logger.warning(f"Agent failed to run for batch [{tag}]: {e}")
         return False
 
     if returncode is None:
-        logger.warning(f"Agent timed out for {vuln.advisory_id}")
+        logger.warning(f"Agent timed out for batch [{tag}]")
         return False
 
     if returncode != 0:
         tail = "\n".join(output.splitlines()[-20:])
-        logger.warning(f"Agent failed for {vuln.advisory_id} (exit {returncode}), tail:\n{tail}")
+        logger.warning(f"Agent failed for batch [{tag}] (exit {returncode}), tail:\n{tail}")
         return False
 
     if not _has_changes(repo_path):
-        logger.info(f"No changes after agent run for {vuln.advisory_id}")
-        return False
+        logger.info(f"No changes after agent run for batch [{tag}]")
+        return lockfix_committed
 
-    commit_msg = f"fix: {vuln.title} ({vuln.advisory_id})"
+    commit_msg = f"fix: {len(agent_vulns)} vulnerabilities ({', '.join(v.advisory_id for v in agent_vulns)})"
     if not _commit_changes(repo_path, commit_msg):
-        logger.warning(f"Failed to commit fix for {vuln.advisory_id}")
+        logger.warning(f"Failed to commit fix for batch [{tag}]")
         return False
 
-    logger.info(f"Fixed {vuln.advisory_id}{position} — fix committed")
+    logger.info(f"Fixed batch [{tag}]{position} — fix committed")
     return True

@@ -47,7 +47,7 @@ def test_apply_fix_success(tmp_path):
         mock_popen.return_value = _fake_proc()
         mock_run.return_value = MagicMock(returncode=0)
         with patch("src.fixer._has_changes", return_value=True):
-            result = apply_fix(config, tmp_path, vuln)
+            result = apply_fix(config, tmp_path, [vuln])
             assert result is True
 
 
@@ -58,7 +58,7 @@ def test_apply_fix_no_changes(tmp_path):
         mock_popen.return_value = _fake_proc()
         mock_run.return_value = MagicMock(returncode=0)
         with patch("src.fixer._has_changes", return_value=False):
-            result = apply_fix(config, tmp_path, vuln)
+            result = apply_fix(config, tmp_path, [vuln])
             assert result is False
 
 
@@ -67,7 +67,7 @@ def test_apply_fix_agent_fails(tmp_path):
     vuln = _make_vuln()
     with patch("subprocess.Popen") as mock_popen:
         mock_popen.return_value = _fake_proc(returncode=1)
-        result = apply_fix(config, tmp_path, vuln)
+        result = apply_fix(config, tmp_path, [vuln])
         assert result is False
 
 
@@ -78,11 +78,11 @@ def test_apply_fix_custom_agent_template(tmp_path):
         mock_popen.return_value = _fake_proc()
         mock_run.return_value = MagicMock(returncode=0)
         with patch("src.fixer._has_changes", return_value=True):
-            apply_fix(config, tmp_path, vuln)
+            apply_fix(config, tmp_path, [vuln])
     cmd = mock_popen.call_args.args[0]
     assert cmd[0] == "gemini"
     assert cmd[1] == "-p"
-    assert "Fix security vulnerability GHSA-test-1234" in cmd[2]
+    assert "Fix the following 1 security vulnerabilities" in cmd[2]
 
 
 def test_apply_fix_model_placeholder_pinned(tmp_path):
@@ -95,10 +95,10 @@ def test_apply_fix_model_placeholder_pinned(tmp_path):
         mock_popen.return_value = _fake_proc()
         mock_run.return_value = MagicMock(returncode=0)
         with patch("src.fixer._has_changes", return_value=True):
-            apply_fix(config, tmp_path, vuln)
+            apply_fix(config, tmp_path, [vuln])
     cmd = mock_popen.call_args.args[0]
     assert cmd[:5] == ["kilo", "run", "--auto", "-m", "anthropic/claude-opus"]
-    assert "Fix security vulnerability GHSA-test-1234" in cmd[5]
+    assert "Fix the following 1 security vulnerabilities" in cmd[5]
 
 
 def test_apply_fix_model_placeholder_empty_drops_flag(tmp_path):
@@ -111,11 +111,11 @@ def test_apply_fix_model_placeholder_empty_drops_flag(tmp_path):
         mock_popen.return_value = _fake_proc()
         mock_run.return_value = MagicMock(returncode=0)
         with patch("src.fixer._has_changes", return_value=True):
-            apply_fix(config, tmp_path, vuln)
+            apply_fix(config, tmp_path, [vuln])
     cmd = mock_popen.call_args.args[0]
     assert "-m" not in cmd
     assert "{model}" not in cmd
-    assert "Fix security vulnerability GHSA-test-1234" in cmd[3]
+    assert "Fix the following 1 security vulnerabilities" in cmd[3]
 
 
 def test_agent_label_prefers_configured_model():
@@ -158,7 +158,7 @@ def test_apply_fix_dependabot_snippet_and_suggestion(tmp_path):
         mock_popen.return_value = _fake_proc()
         mock_run.return_value = MagicMock(returncode=0)
         with patch("src.fixer._has_changes", return_value=True):
-            apply_fix(config, tmp_path, vuln)
+            apply_fix(config, tmp_path, [vuln])
     cmd = mock_popen.call_args.args[0]
     prompt = cmd[config.ai_agent_args.index("{prompt}")]
     assert "GitHub recommends upgrading org.apache.calcite:calcite-core to version 1.42.0" in prompt
@@ -189,7 +189,7 @@ def test_apply_fix_transitive_dep_rule(tmp_path):
         mock_popen.return_value = _fake_proc()
         mock_run.return_value = MagicMock(returncode=0)
         with patch("src.fixer._has_changes", return_value=True):
-            apply_fix(config, tmp_path, vuln)
+            apply_fix(config, tmp_path, [vuln])
     prompt = _prompt_of_last_agent_call(mock_popen, config)
     assert "TRANSITIVE dependency" in prompt
     assert "org.apache.calcite:calcite-core" in prompt
@@ -205,7 +205,7 @@ def test_apply_fix_transitive_dep_no_patched_version(tmp_path):
         mock_popen.return_value = _fake_proc()
         mock_run.return_value = MagicMock(returncode=0)
         with patch("src.fixer._has_changes", return_value=True):
-            apply_fix(config, tmp_path, vuln)
+            apply_fix(config, tmp_path, [vuln])
     prompt = _prompt_of_last_agent_call(mock_popen, config)
     assert "Upgrade the direct dependency that introduces it" in prompt
     assert "Do NOT run dependency-tree" in prompt
@@ -220,10 +220,10 @@ def test_apply_fix_fix_position_logged(tmp_path, caplog):
         mock_run.return_value = MagicMock(returncode=0)
         with patch("src.fixer._has_changes", return_value=True):
             with caplog.at_level(logging.INFO, logger="src.fixer"):
-                result = apply_fix(config, tmp_path, vuln, fix_number=2, max_fixes=5)
+                result = apply_fix(config, tmp_path, [vuln], fix_number=2, max_fixes=5)
     assert result is True
-    assert "for GHSA-test-1234 (fix 2/5)" in caplog.text
-    assert "Fixed GHSA-test-1234 (fix 2/5)" in caplog.text
+    assert "for batch [GHSA-test-1234] (fix 2/5)" in caplog.text
+    assert "Fixed batch [GHSA-test-1234] (fix 2/5)" in caplog.text
 
 
 def test_apply_fix_no_position_without_params(tmp_path, caplog):
@@ -235,7 +235,7 @@ def test_apply_fix_no_position_without_params(tmp_path, caplog):
         mock_run.return_value = MagicMock(returncode=0)
         with patch("src.fixer._has_changes", return_value=True):
             with caplog.at_level(logging.INFO, logger="src.fixer"):
-                apply_fix(config, tmp_path, vuln)
+                apply_fix(config, tmp_path, [vuln])
     assert "(fix " not in caplog.text
 
 
@@ -248,10 +248,10 @@ def test_apply_fix_start_end_banners(tmp_path, caplog):
         mock_run.return_value = MagicMock(returncode=0)
         with patch("src.fixer._has_changes", return_value=True):
             with caplog.at_level(logging.INFO, logger="src.fixer"):
-                result = apply_fix(config, tmp_path, vuln, fix_number=2, max_fixes=5)
+                result = apply_fix(config, tmp_path, [vuln], fix_number=2, max_fixes=5)
     assert result is True
-    assert "===== START fix GHSA-test-1234 (fix 2/5) =====" in caplog.text
-    assert "===== END fix GHSA-test-1234 (fix 2/5): FIXED =====" in caplog.text
+    assert "===== START fix batch [GHSA-test-1234] (fix 2/5) =====" in caplog.text
+    assert "===== END fix batch [GHSA-test-1234] (fix 2/5): FIXED =====" in caplog.text
 
 
 def test_apply_fix_end_banner_no_fix(tmp_path, caplog):
@@ -263,10 +263,28 @@ def test_apply_fix_end_banner_no_fix(tmp_path, caplog):
         mock_run.return_value = MagicMock(returncode=0)
         with patch("src.fixer._has_changes", return_value=False):
             with caplog.at_level(logging.INFO, logger="src.fixer"):
-                result = apply_fix(config, tmp_path, vuln)
+                result = apply_fix(config, tmp_path, [vuln])
     assert result is False
-    assert "===== START fix GHSA-test-1234 =====" in caplog.text
-    assert "===== END fix GHSA-test-1234: NO FIX =====" in caplog.text
+    assert "===== START fix batch [GHSA-test-1234] =====" in caplog.text
+    assert "===== END fix batch [GHSA-test-1234]: NO FIX =====" in caplog.text
+
+
+def test_apply_fix_batch_single_agent_call(tmp_path):
+    config = _make_config()
+    vuln1 = _make_vuln()
+    vuln2 = _make_vuln()
+    vuln2.advisory_id = "GHSA-test-5678"
+    vuln2.title = "Second vuln"
+    with patch("subprocess.Popen") as mock_popen, patch("subprocess.run") as mock_run:
+        mock_popen.return_value = _fake_proc()
+        mock_run.return_value = MagicMock(returncode=0)
+        with patch("src.fixer._has_changes", return_value=True):
+            result = apply_fix(config, tmp_path, [vuln1, vuln2])
+    assert result is True
+    mock_popen.assert_called_once()
+    prompt = _prompt_of_last_agent_call(mock_popen, config)
+    assert "--- Vulnerability GHSA-test-1234: Test vulnerability ---" in prompt
+    assert "--- Vulnerability GHSA-test-5678: Second vuln ---" in prompt
 
 
 def test_apply_fix_streams_agent_output_to_log(tmp_path, caplog):
@@ -278,7 +296,7 @@ def test_apply_fix_streams_agent_output_to_log(tmp_path, caplog):
         mock_run.return_value = MagicMock(returncode=0)
         with patch("src.fixer._has_changes", return_value=True):
             with caplog.at_level(logging.INFO, logger="src.fixer"):
-                apply_fix(config, tmp_path, vuln)
+                apply_fix(config, tmp_path, [vuln])
     assert "[GHSA-test-1234] working on fix" in caplog.text
     assert "[GHSA-test-1234] done" in caplog.text
 
@@ -300,13 +318,13 @@ def test_apply_fix_npm_lockfile_fast_path_no_agent(tmp_path):
         mock_popen.return_value = _fake_proc()
         mock_run.return_value = MagicMock(returncode=0)
         with patch("src.fixer._has_changes", return_value=True):
-            result = apply_fix(config, tmp_path, vuln)
+            result = apply_fix(config, tmp_path, [vuln])
     assert result is True
     assert not lockfile.exists()
     mock_popen.assert_not_called()
     commits = [c for c in mock_run.call_args_list if "commit" in c.args[0]]
     assert len(commits) == 1
-    assert "remove package-lock.json" in commits[0].args[0][-1]
+    assert "remove lockfile(s) [package-lock.json]" in commits[0].args[0][-1]
 
 
 def test_apply_fix_npm_lockfile_commit_fails_falls_back_to_agent(tmp_path):
@@ -327,7 +345,7 @@ def test_apply_fix_npm_lockfile_commit_fails_falls_back_to_agent(tmp_path):
         mock_popen.return_value = _fake_proc()
         mock_run.side_effect = [ok, fail, ok, ok]
         with patch("src.fixer._has_changes", return_value=True):
-            result = apply_fix(config, tmp_path, vuln)
+            result = apply_fix(config, tmp_path, [vuln])
     assert result is True
     mock_popen.assert_called_once()
 
@@ -341,6 +359,6 @@ def test_apply_fix_direct_dep_no_transitive_rule(tmp_path):
         mock_popen.return_value = _fake_proc()
         mock_run.return_value = MagicMock(returncode=0)
         with patch("src.fixer._has_changes", return_value=True):
-            apply_fix(config, tmp_path, vuln)
+            apply_fix(config, tmp_path, [vuln])
     prompt = _prompt_of_last_agent_call(mock_popen, config)
     assert "TRANSITIVE dependency" not in prompt

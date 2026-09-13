@@ -21,18 +21,16 @@ def pr_exists_for_branch(client: GitHubClient, repo_full_name: str, branch_name:
 def create_pull_request(
     client: GitHubClient,
     repo_full_name: str,
-    vuln: Vulnerability,
+    batch: list[Vulnerability],
     base_branch: str,
+    branch_name: str,
 ) -> dict | None:
-    """Create a pull request for the fix. Returns PR info dict or None on failure."""
-    branch_name = f"fix/{vuln.advisory_id}"
-    title = f"Fix: {vuln.title} ({vuln.advisory_id})"
-    body = (
-        f"Security advisory: {vuln.description}\n\n"
-        f"**Source:** {vuln.source}\n"
-        f"**Severity:** {vuln.severity}\n"
-        f"**Advisory ID:** {vuln.advisory_id}"
-    )
+    """Create a pull request fixing a batch of vulns. Returns PR info dict or None on failure."""
+    ids = [v.advisory_id for v in batch]
+    id_list = ", ".join(ids[:3]) + ("..." if len(ids) > 3 else "")
+    title = f"Fix: {len(batch)} vulnerabilities ({id_list})"
+    lines = "\n".join(f"- **{v.advisory_id}** ({v.severity}): {v.title}" for v in batch)
+    body = f"Security fixes for {len(batch)} advisories in this batch:\n\n{lines}"
 
     try:
         pr = client.post(
@@ -47,5 +45,5 @@ def create_pull_request(
         logger.info(f"Created PR: {pr.get('html_url')}")
         return pr
     except Exception as e:
-        logger.error(f"Failed to create PR for {vuln.advisory_id}: {e}")
+        logger.error(f"Failed to create PR for batch [{', '.join(ids)}]: {e}")
         return None
