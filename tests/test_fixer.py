@@ -211,6 +211,34 @@ def test_apply_fix_transitive_dep_no_patched_version(tmp_path):
     assert "Do NOT run dependency-tree" in prompt
 
 
+def test_apply_fix_fix_position_logged(tmp_path, caplog):
+    import logging
+    config = _make_config()
+    vuln = _make_vuln()
+    with patch("subprocess.Popen") as mock_popen, patch("subprocess.run") as mock_run:
+        mock_popen.return_value = _fake_proc()
+        mock_run.return_value = MagicMock(returncode=0)
+        with patch("src.fixer._has_changes", return_value=True):
+            with caplog.at_level(logging.INFO, logger="src.fixer"):
+                result = apply_fix(config, tmp_path, vuln, fix_number=2, max_fixes=5)
+    assert result is True
+    assert "for GHSA-test-1234 (fix 2/5)" in caplog.text
+    assert "Fixed GHSA-test-1234 (fix 2/5)" in caplog.text
+
+
+def test_apply_fix_no_position_without_params(tmp_path, caplog):
+    import logging
+    config = _make_config()
+    vuln = _make_vuln()
+    with patch("subprocess.Popen") as mock_popen, patch("subprocess.run") as mock_run:
+        mock_popen.return_value = _fake_proc()
+        mock_run.return_value = MagicMock(returncode=0)
+        with patch("src.fixer._has_changes", return_value=True):
+            with caplog.at_level(logging.INFO, logger="src.fixer"):
+                apply_fix(config, tmp_path, vuln)
+    assert "(fix " not in caplog.text
+
+
 def test_apply_fix_streams_agent_output_to_log(tmp_path, caplog):
     import logging
     config = _make_config()

@@ -79,7 +79,7 @@ def process_repo(
 
         result.fixes_attempted += 1
 
-        if not apply_fix(config, repo_path, vuln):
+        if not apply_fix(config, repo_path, vuln, fix_number=result.fixes_attempted, max_fixes=max_fixes):
             logger.info(f"No fix applied for {vuln.advisory_id}, skipping PR")
             result.skipped += 1
             checkout(repo_path, default_branch)
@@ -148,11 +148,14 @@ def main(argv: list[str] | None = None) -> None:
             vulns = fetch_repo_advisories(client, repo_full_name)
             result.vulns_found += len(vulns)
 
-            if not vulns or args.dry_run or args.report_only:
-                if args.dry_run:
-                    logger.info("Dry run mode — skipping clone/fix/PR")
-                elif args.report_only:
-                    logger.info("Report-only mode — skipping clone/fix/PR")
+            if not vulns:
+                logger.info(f"SKIP {repo_full_name} — no open vulnerabilities")
+                continue
+            if args.dry_run:
+                logger.info("Dry run mode — skipping clone/fix/PR")
+                continue
+            if args.report_only:
+                logger.info("Report-only mode — skipping clone/fix/PR")
                 continue
 
             process_repo(client, config, repo_full_name, vulns, result, args.max_fixes)

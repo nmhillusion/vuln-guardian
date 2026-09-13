@@ -221,7 +221,13 @@ def _commit_lockfile_removal(repo_path: Path, manifest_path: str, advisory_id: s
     return True
 
 
-def apply_fix(config: Config, repo_path: Path, vuln: Vulnerability) -> bool:
+def apply_fix(
+    config: Config,
+    repo_path: Path,
+    vuln: Vulnerability,
+    fix_number: int | None = None,
+    max_fixes: int | None = None,
+) -> bool:
     """Invoke agent CLI to fix a vulnerability. Returns True if fix applied."""
     affected = ", ".join(vuln.affected_files) if vuln.affected_files else "affected files"
 
@@ -272,7 +278,8 @@ def apply_fix(config: Config, repo_path: Path, vuln: Vulnerability) -> bool:
             fix_instruction = "Upgrade the direct dependency that introduces it to a fixed version."
         prompt += _TRANSITIVE_DEP_RULE.format(package=vuln.package_name, fix_instruction=fix_instruction)
 
-    logger.info(f"Invoking agent {_agent_label(config.ai_agent_args, config.ai_agent_model)} for {vuln.advisory_id}...")
+    position = f" (fix {fix_number}/{max_fixes})" if fix_number is not None and max_fixes is not None else ""
+    logger.info(f"Invoking agent {_agent_label(config.ai_agent_args, config.ai_agent_model)} for {vuln.advisory_id}{position}...")
     logger.info(f"  Severity: {vuln.severity} | Package: {vuln.package_name} | Source: {vuln.source}")
     if vuln.dependency_relationship or vuln.dependency_scope or vuln.manifest_path:
         logger.info(
@@ -322,4 +329,5 @@ def apply_fix(config: Config, repo_path: Path, vuln: Vulnerability) -> bool:
         logger.warning(f"Failed to commit fix for {vuln.advisory_id}")
         return False
 
+    logger.info(f"Fixed {vuln.advisory_id}{position} — fix committed")
     return True
