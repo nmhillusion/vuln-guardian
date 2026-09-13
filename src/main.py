@@ -56,6 +56,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
     parser.add_argument("--no-browser", action="store_true", help="Don't auto-open the HTML report")
     parser.add_argument("--no-color", action="store_true", help="Disable colored log output")
+    parser.add_argument("--log-file", type=str, default="vuln-guardian.log", help="Log file path (reset every run, empty disables)")
     parser.add_argument("--max-fixes", type=int, default=5, help="Max fix batches per run (default: 5)")
     parser.add_argument("--batch-size", type=int, default=5, help="Max vulnerabilities per fix batch/PR (default: 5)")
     parser.add_argument("--yes", action="store_true", help="Auto-approve prompts (e.g. clone directory creation)")
@@ -204,11 +205,16 @@ def main(argv: list[str] | None = None) -> None:
 
     log_level = logging.DEBUG if args.verbose else logging.INFO
     use_color = sys.stdout.isatty() and not args.no_color
-    handler = logging.StreamHandler()
-    handler.setFormatter(
-        _ColorFormatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", use_color=use_color)
-    )
-    logging.basicConfig(level=log_level, handlers=[handler], force=True)
+    fmt = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    handlers: list[logging.Handler] = []
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(_ColorFormatter(fmt, use_color=use_color))
+    handlers.append(console_handler)
+    if args.log_file:
+        file_handler = logging.FileHandler(args.log_file, mode="w", encoding="utf-8")
+        file_handler.setFormatter(_ColorFormatter(fmt, use_color=False))
+        handlers.append(file_handler)
+    logging.basicConfig(level=log_level, handlers=handlers, force=True)
 
     try:
         config = load_config(args.config)

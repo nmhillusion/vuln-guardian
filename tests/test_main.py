@@ -10,6 +10,15 @@ def _record(level, msg):
     return logging.LogRecord("test", level, __file__, 1, msg, None, None)
 
 
+@pytest.fixture(autouse=True)
+def _no_file_log():
+    before = set(logging.root.handlers)
+    with patch("logging.FileHandler", side_effect=lambda *args, **kwargs: logging.NullHandler()):
+        yield
+    for h in set(logging.root.handlers) - before:
+        logging.root.removeHandler(h)
+
+
 def test_color_formatter_banners_magenta():
     f = _ColorFormatter("%(message)s", use_color=True)
     assert f.format(_record(logging.INFO, "===== START fix X =====")).startswith("\x1b[35m")

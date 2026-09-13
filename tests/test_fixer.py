@@ -1,7 +1,8 @@
 # tests/test_fixer.py
+import subprocess
 from pathlib import Path
 from unittest.mock import patch, MagicMock
-from src.fixer import apply_fix, _agent_label
+from src.fixer import apply_fix, _agent_label, _run_agent_streaming
 from src.models import Vulnerability
 from src.config import Config
 
@@ -193,7 +194,8 @@ def test_apply_fix_transitive_dep_rule(tmp_path):
     prompt = _prompt_of_last_agent_call(mock_popen, config)
     assert "TRANSITIVE dependency" in prompt
     assert "org.apache.calcite:calcite-core" in prompt
-    assert "GitHub recommends version 1.42.0" in prompt
+    assert "Upgrade the direct dependency that introduces it to a version that includes fixed org.apache.calcite:calcite-core 1.42.0" in prompt
+    assert "Do NOT add org.apache.calcite:calcite-core as a new direct dependency" in prompt
     assert "Do NOT run dependency-tree" in prompt
 
 
@@ -207,8 +209,10 @@ def test_apply_fix_transitive_dep_no_patched_version(tmp_path):
         with patch("src.fixer._has_changes", return_value=True):
             apply_fix(config, tmp_path, [vuln])
     prompt = _prompt_of_last_agent_call(mock_popen, config)
-    assert "Upgrade the direct dependency that introduces it" in prompt
+    assert "Upgrade the direct dependency that introduces it to a fixed version" in prompt
+    assert "Do NOT add org.apache.calcite:calcite-core as a new direct dependency" in prompt
     assert "Do NOT run dependency-tree" in prompt
+    assert "CANNOT FIX:" in prompt
 
 
 def test_apply_fix_fix_position_logged(tmp_path, caplog):
@@ -250,8 +254,8 @@ def test_apply_fix_start_end_banners(tmp_path, caplog):
             with caplog.at_level(logging.INFO, logger="src.fixer"):
                 result = apply_fix(config, tmp_path, [vuln], fix_number=2, max_fixes=5)
     assert result is True
-    assert "===== START fix batch [GHSA-test-1234] (fix 2/5) =====" in caplog.text
-    assert "===== END fix batch [GHSA-test-1234] (fix 2/5): FIXED =====" in caplog.text
+    assert "===== START (fix 2/5) fix batch [GHSA-test-1234] =====" in caplog.text
+    assert "===== END (fix 2/5) fix batch [GHSA-test-1234]: FIXED =====" in caplog.text
 
 
 def test_apply_fix_end_banner_no_fix(tmp_path, caplog):
@@ -266,7 +270,21 @@ def test_apply_fix_end_banner_no_fix(tmp_path, caplog):
                 result = apply_fix(config, tmp_path, [vuln])
     assert result is False
     assert "===== START fix batch [GHSA-test-1234] =====" in caplog.text
-    assert "===== END fix batch [GHSA-test-1234]: NO FIX =====" in caplog.text
+    assert "===== END fix batch [GHSA-test-1234]: NO FIX — no changes produced =====" in caplog.text
+
+
+def test_apply_fix_end_banner_timeout_reason(tmp_path, caplog):
+    import logging
+    config = _make_config()
+    vuln = _make_vuln()
+    with patch("subprocess.Popen") as mock_popen, patch("subprocess.run") as mock_run:
+        mock_popen.return_value = _fake_proc(returncode=None)
+        mock_run.return_value = MagicMock(returncode=0)
+        with patch("src.fixer._has_changes", return_value=True):
+            with caplog.at_level(logging.INFO, logger="src.fixer"):
+                result = apply_fix(config, tmp_path, [vuln])
+    assert result is False
+    assert ": NO FIX — agent timed out =====" in caplog.text
 
 
 def test_apply_fix_batch_single_agent_call(tmp_path):
@@ -285,6 +303,81 @@ def test_apply_fix_batch_single_agent_call(tmp_path):
     prompt = _prompt_of_last_agent_call(mock_popen, config)
     assert "--- Vulnerability GHSA-test-1234: Test vulnerability ---" in prompt
     assert "--- Vulnerability GHSA-test-5678: Second vuln ---" in prompt
+
+
+def test_apply_fix_stdin_prompt_not_in_argv(tmp_path):
+    config = _make_config(ai_agent_stdin=True, ai_agent_args=["kilo", "run", "--auto"])
+    vuln = _make_vuln()
+    with patch("subprocess.Popen") as mock_popen, patch("subprocess.run") as mock_run:
+        mock_popen.return_value = _fake_proc()
+        mock_run.return_value = MagicMock(returncode=0)
+        with patch("src.fixer._has_changes", return_value=True):
+            result = apply_fix(config, tmp_path, [vuln])
+    assert result is True
+    cmd = mock_popen.call_args.args[0]
+    assert all("GHSA-test-1234" not in str(a) for a in cmd)
+    assert mock_popen.call_args.kwargs.get("stdin") == subprocess.PIPE
+
+
+def test_run_agent_streaming_stdin_roundtrip(tmp_path):
+    import sys
+    big = "0123456789abcdef\n" * 5000  # ~85KB: exceeds pipe buffer and old argv limits
+    code = "import sys; data = sys.stdin.read(); print(f'GOT:{len(data)}')"
+    returncode, output = _run_agent_streaming(
+        [sys.executable, "-c", code], str(tmp_path), 60, "probe", big
+    )
+    assert returncode == 0
+    assert f"GOT:{len(big)}" in output
+
+
+def test_apply_fix_no_subagents_rule(tmp_path):
+    config = _make_config()
+    vuln = _make_vuln()
+    with patch("subprocess.Popen") as mock_popen, patch("subprocess.run") as mock_run:
+        mock_popen.return_value = _fake_proc()
+        mock_run.return_value = MagicMock(returncode=0)
+        with patch("src.fixer._has_changes", return_value=True):
+            apply_fix(config, tmp_path, [vuln])
+    prompt = _prompt_of_last_agent_call(mock_popen, config)
+    assert "Do not spawn subagents" in prompt
+
+
+def test_apply_fix_chain_in_prompt_and_log(tmp_path, caplog):
+    import logging
+    config = _make_config()
+    vuln = _make_dep_vuln()
+    vuln.manifest_path = "settings.gradle.kts"
+    vuln.dependency_chain = [
+        "pkg:github/o/r@main",
+        "org.owasp:dependency-check-core@9.2.0",
+        "com.h2database:h2@2.1.214",
+    ]
+    with patch("subprocess.Popen") as mock_popen, patch("subprocess.run") as mock_run:
+        mock_popen.return_value = _fake_proc()
+        mock_run.return_value = MagicMock(returncode=0)
+        with patch("src.fixer._has_changes", return_value=True):
+            with caplog.at_level(logging.INFO, logger="src.fixer"):
+                result = apply_fix(config, tmp_path, [vuln])
+    assert result is True
+    prompt = _prompt_of_last_agent_call(mock_popen, config)
+    assert "Dependency chain:" in prompt
+    assert "The direct parent is org.owasp:dependency-check-core@9.2.0" in prompt
+    assert "Chain: pkg:github/o/r@main -> org.owasp:dependency-check-core@9.2.0 -> com.h2database:h2@2.1.214" in caplog.text
+
+
+def test_apply_fix_cannot_fix_marker_reported(tmp_path, caplog):
+    import logging
+    config = _make_config()
+    vuln = _make_vuln()
+    with patch("subprocess.Popen") as mock_popen, patch("subprocess.run") as mock_run:
+        mock_popen.return_value = _fake_proc(lines=("checked parent\n", "CANNOT FIX: parent has no fixed release\n"))
+        mock_run.return_value = MagicMock(returncode=0)
+        with patch("src.fixer._has_changes", return_value=False):
+            with caplog.at_level(logging.INFO, logger="src.fixer"):
+                result = apply_fix(config, tmp_path, [vuln])
+    assert result is False
+    assert "Agent cannot fix batch [GHSA-test-1234]: parent has no fixed release" in caplog.text
+    assert "NO FIX — cannot fix: parent has no fixed release" in caplog.text
 
 
 def test_apply_fix_streams_agent_output_to_log(tmp_path, caplog):

@@ -24,6 +24,8 @@ _BASE_FIX_PROMPT = (
     "no commands that modify files outside the .repos folder, and no credential or secret "
     "operations. Do not ask for confirmation for approved actions; stop and report if an "
     "action is outside the approved scope. "
+    "Do not spawn subagents or delegate work to other agents — "
+    "perform all investigation, edits, and verification directly yourself in this session. "
 )
 
 _TRANSITIVE_DEP_RULE = (
@@ -141,13 +143,17 @@ _AGENT_TIMEOUT_SECONDS = 600
 _EOF = object()
 
 
-def _run_agent_streaming(cmd: list[str], cwd: str, timeout: int, tag: str) -> tuple[int | None, str]:
+def _run_agent_streaming(
+    cmd: list[str], cwd: str, timeout: int, tag: str, input_text: str | None = None
+) -> tuple[int | None, str]:
     """Run the agent CLI, streaming each output line to the log live.
 
+    When input_text is given it is piped via stdin (avoids command-line length limits).
     Returns (returncode, full_output); returncode None means timed out (process killed).
     """
     proc = subprocess.Popen(
         cmd,
+        stdin=subprocess.PIPE if input_text is not None else None,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -157,6 +163,17 @@ def _run_agent_streaming(cmd: list[str], cwd: str, timeout: int, tag: str) -> tu
         cwd=cwd,
     )
     line_queue: queue.Queue = queue.Queue()
+
+    if input_text is not None:
+        def _writer() -> None:
+            try:
+                assert proc.stdin is not None
+                proc.stdin.write(input_text)
+                proc.stdin.close()
+            except (BrokenPipeError, OSError, ValueError):
+                pass
+
+        threading.Thread(target=_writer, daemon=True).start()
 
     def _reader() -> None:
         try:
@@ -251,14 +268,24 @@ def _prepare_vuln(repo_path: Path, vuln: Vulnerability) -> tuple[str, str]:
     if vuln.introduced_at:
         section += f" Exact introducing location:\n{vuln.introduced_at}"
     if vuln.dependency_relationship == "transitive" and vuln.package_name:
+        pkg = vuln.package_name
+        parent = vuln.dependency_chain[-2] if vuln.dependency_chain and len(vuln.dependency_chain) >= 2 else None
+        who = f"the direct parent {parent}" if parent else "the direct dependency that introduces it"
         if vuln.patched_version:
-            fix_instruction = (
-                f"GitHub recommends version {vuln.patched_version}: "
-                f"pin {vuln.package_name} to that version as a direct dependency."
-            )
+            target = f" to a version that includes fixed {pkg} {vuln.patched_version}"
         else:
-            fix_instruction = "Upgrade the direct dependency that introduces it to a fixed version."
-        section += _TRANSITIVE_DEP_RULE.format(package=vuln.package_name, fix_instruction=fix_instruction)
+            target = " to a fixed version"
+        fix_instruction = (
+            f"Upgrade {who}{target}. "
+            f"Do NOT add {pkg} as a new direct dependency. "
+            f"If no version of {who} includes the fix, STOP immediately — "
+            f"do not try alternative fixes and do not edit other files. "
+            f"End your response with: CANNOT FIX: <one-line reason>."
+        )
+        section += _TRANSITIVE_DEP_RULE.format(package=pkg, fix_instruction=fix_instruction)
+    if vuln.dependency_chain and len(vuln.dependency_chain) >= 2:
+        chain_str = " -> ".join(vuln.dependency_chain)
+        section += f" Dependency chain: {chain_str}. The direct parent is {vuln.dependency_chain[-2]}."
     return section, suggestion
 
 
@@ -273,8 +300,18 @@ def _log_vuln_detail(vuln: Vulnerability, suggestion: str) -> None:
     logger.info(f"  [{vuln.advisory_id}] Title: {vuln.title}")
     if suggestion:
         logger.info(f"  [{vuln.advisory_id}] Suggestion: {suggestion}")
+    if vuln.dependency_chain and len(vuln.dependency_chain) >= 2:
+        logger.info(f"  [{vuln.advisory_id}] Chain: {' -> '.join(vuln.dependency_chain)}")
     if vuln.introduced_at:
         logger.info(f"  [{vuln.advisory_id}] Introduced at:\n{vuln.introduced_at}")
+
+
+def _cannot_fix_reason(output: str) -> str | None:
+    """Extract the CANNOT FIX: <reason> marker from agent output, if present."""
+    for line in output.splitlines():
+        if "CANNOT FIX:" in line:
+            return line.split("CANNOT FIX:", 1)[1].strip() or "no reason given"
+    return None
 
 
 def _fix_position(fix_number: int | None, max_fixes: int | None) -> str:
@@ -293,9 +330,10 @@ def apply_fix(
     """Fix a batch of vulnerabilities, logging START/END banners. Returns True if fix applied."""
     ids = ", ".join(v.advisory_id for v in vulns)
     position = _fix_position(fix_number, max_fixes)
-    logger.info(f"===== START fix batch [{ids}]{position} =====")
-    ok = _apply_fix_inner(config, repo_path, vulns, fix_number, max_fixes)
-    logger.info(f"===== END fix batch [{ids}]{position}: {'FIXED' if ok else 'NO FIX'} =====")
+    logger.info(f"===== START{position} fix batch [{ids}] =====")
+    ok, reason = _apply_fix_inner(config, repo_path, vulns, fix_number, max_fixes)
+    outcome = "FIXED" if ok else (f"NO FIX — {reason}" if reason else "NO FIX")
+    logger.info(f"===== END{position} fix batch [{ids}]: {outcome} =====")
     return ok
 
 
@@ -305,10 +343,10 @@ def _apply_fix_inner(
     vulns: list[Vulnerability],
     fix_number: int | None = None,
     max_fixes: int | None = None,
-) -> bool:
-    """Invoke agent CLI to fix a batch of vulnerabilities. Returns True if fix applied."""
+) -> tuple[bool, str]:
+    """Invoke agent CLI to fix a batch of vulnerabilities. Returns (ok, reason)."""
     if not vulns:
-        return False
+        return False, "empty batch"
     position = _fix_position(fix_number, max_fixes)
     ids = [v.advisory_id for v in vulns]
     tag = ",".join(ids)
@@ -343,7 +381,7 @@ def _apply_fix_inner(
 
     if not agent_vulns:
         if lockfix_committed:
-            return True
+            return True, ""
         # Commit failed: let the agent handle these vulns (lockfile already deleted).
         agent_vulns = lockfile_vulns
         lockfile_vulns = []
@@ -369,39 +407,48 @@ def _apply_fix_inner(
 
     cmd: list[str] = []
     for a in config.ai_agent_args:
+        if a == "{prompt}":
+            if not config.ai_agent_stdin:
+                cmd.append(prompt)
+            continue
         if a == "{model}":
             if config.ai_agent_model:
                 cmd.append(config.ai_agent_model)
             elif cmd and cmd[-1] in ("-m", "--model"):
                 cmd.pop()
             continue
-        cmd.append(prompt if a == "{prompt}" else a)
-    if prompt not in cmd:
+        cmd.append(a)
+    if not config.ai_agent_stdin and prompt not in cmd:
         cmd.append(prompt)
+    input_text = prompt if config.ai_agent_stdin else None
 
     try:
-        returncode, output = _run_agent_streaming(cmd, str(repo_path), _AGENT_TIMEOUT_SECONDS, tag)
+        returncode, output = _run_agent_streaming(cmd, str(repo_path), _AGENT_TIMEOUT_SECONDS, tag, input_text)
     except Exception as e:
         logger.warning(f"Agent failed to run for batch [{tag}]: {e}")
-        return False
+        return False, f"agent error: {e}"
 
     if returncode is None:
         logger.warning(f"Agent timed out for batch [{tag}]")
-        return False
+        return False, "agent timed out"
 
     if returncode != 0:
         tail = "\n".join(output.splitlines()[-20:])
         logger.warning(f"Agent failed for batch [{tag}] (exit {returncode}), tail:\n{tail}")
-        return False
+        return False, f"agent exit {returncode}"
 
     if not _has_changes(repo_path):
         logger.info(f"No changes after agent run for batch [{tag}]")
-        return lockfix_committed
+        marker = _cannot_fix_reason(output)
+        if marker:
+            logger.warning(f"Agent cannot fix batch [{tag}]: {marker}")
+            return lockfix_committed, ("" if lockfix_committed else f"cannot fix: {marker}")
+        return lockfix_committed, ("" if lockfix_committed else "no changes produced")
 
     commit_msg = f"fix: {len(agent_vulns)} vulnerabilities ({', '.join(v.advisory_id for v in agent_vulns)})"
     if not _commit_changes(repo_path, commit_msg):
         logger.warning(f"Failed to commit fix for batch [{tag}]")
-        return False
+        return False, "commit failed"
 
     logger.info(f"Fixed batch [{tag}]{position} — fix committed")
-    return True
+    return True, ""

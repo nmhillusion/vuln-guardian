@@ -1,8 +1,19 @@
 # tests/test_integration.py
 """Integration test — runs the full pipeline with mocked external services."""
+import logging
+import pytest
 from unittest.mock import patch, MagicMock
 from src.main import main
 from src.models import Vulnerability, RunResult
+
+
+@pytest.fixture(autouse=True)
+def _no_file_log():
+    before = set(logging.root.handlers)
+    with patch("logging.FileHandler", side_effect=lambda *args, **kwargs: logging.NullHandler()):
+        yield
+    for h in set(logging.root.handlers) - before:
+        logging.root.removeHandler(h)
 
 
 def test_full_dry_run_pipeline(tmp_path):

@@ -1,6 +1,11 @@
 # tests/test_fetcher.py
 from unittest.mock import MagicMock, patch
-from src.fetcher import fetch_all_advisories, _parse_dependabot_alerts, _parse_code_scanning_alerts
+from src.fetcher import (
+    fetch_all_advisories,
+    fetch_repo_advisories,
+    _parse_dependabot_alerts,
+    _parse_code_scanning_alerts,
+)
 from src.models import Vulnerability
 
 
@@ -102,3 +107,42 @@ def test_parse_code_scanning_alerts_lines():
     result = _parse_code_scanning_alerts("test-org/repo1", alerts)
     assert result[0].start_line == 12
     assert result[0].end_line == 15
+
+
+def test_fetch_repo_advisories_resolves_transitive_chain():
+    client = MagicMock()
+    alert = {
+        "number": 12,
+        "security_advisory": {"ghsa_id": "GHSA-x", "severity": "high",
+                              "summary": "S", "description": "D"},
+        "security_vulnerability": {
+            "package": {"name": "com.h2database:h2", "ecosystem": "maven"},
+            "vulnerable_version_range": "< 2.2.220",
+            "first_patched_version": {"identifier": "2.2.220"},
+        },
+        "dependency": {"manifest_path": "settings.gradle.kts", "scope": None,
+                       "relationship": "transitive"},
+        "state": "open",
+    }
+    client.get_paginated.side_effect = [[alert], [], []]
+    sbom = {
+        "packages": [
+            {"SPDXID": "SPDXRef-R", "name": "r",
+             "externalRefs": [{"referenceType": "purl", "referenceLocator": "pkg:github/o/r@main"}]},
+            {"SPDXID": "SPDXRef-H", "name": "h",
+             "externalRefs": [{"referenceType": "purl",
+                               "referenceLocator": "pkg:maven/com.h2database/h2@2.1.214"}]},
+        ],
+        "relationships": [
+            {"spdxElementId": "SPDXRef-DOCUMENT", "relatedSpdxElement": "SPDXRef-R",
+             "relationshipType": "DESCRIBES"},
+            {"spdxElementId": "SPDXRef-R", "relatedSpdxElement": "SPDXRef-H",
+             "relationshipType": "DEPENDS_ON"},
+        ],
+    }
+    with patch("src.fetcher.fetch_sbom", return_value=sbom) as mock_sbom:
+        vulns = fetch_repo_advisories(client, "test-org/repo1")
+    mock_sbom.assert_called_once()
+    assert len(vulns) == 1
+    assert vulns[0].ecosystem == "maven"
+    assert vulns[0].dependency_chain == ["pkg:github/o/r@main", "com.h2database:h2@2.1.214"]

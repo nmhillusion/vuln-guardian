@@ -8,6 +8,7 @@ if TYPE_CHECKING:
     from src.github_client import GitHubClient
 
 from src.models import Vulnerability
+from src.sbom import fetch_sbom, find_chain
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,7 @@ def _parse_dependabot_alerts(repo_full_name: str, alerts: list[dict]) -> list[Vu
                 package_name=package.get("name"),
                 source="dependabot",
                 state="open",
+                ecosystem=package.get("ecosystem"),
                 patched_version=first_patched.get("identifier"),
                 vulnerable_range=vuln_info.get("vulnerable_version_range"),
                 manifest_path=dependency.get("manifest_path"),
@@ -105,6 +107,19 @@ def fetch_repo_advisories(client: GitHubClient, repo_full_name: str) -> list[Vul
         logger.warning(f"Failed to fetch Code Scanning alerts for {repo_full_name}: {e}")
 
     vulns.extend(_parse_ghsa_for_repo(client, repo_full_name))
+
+    transitives = [
+        v for v in vulns
+        if v.dependency_relationship == "transitive" and v.package_name and v.ecosystem
+    ]
+    if transitives:
+        sbom = fetch_sbom(client, repo_full_name)
+        if sbom:
+            for v in transitives:
+                assert v.ecosystem is not None and v.package_name is not None
+                v.dependency_chain = find_chain(sbom, v.ecosystem, v.package_name)
+                if v.dependency_chain:
+                    logger.info(f"Chain for {v.package_name}: {' -> '.join(v.dependency_chain)}")
     return vulns
 
 

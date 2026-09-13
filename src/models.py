@@ -15,6 +15,8 @@ class Vulnerability:
     package_name: str | None
     source: str  # "ghsa" | "dependabot" | "code_scanning"
     state: str  # "open" | "dismissed" | "fixed"
+    ecosystem: str | None = None  # "maven" | "npm" | ...
+    dependency_chain: list[str] | None = None  # root -> ... -> package
     patched_version: str | None = None  # first version containing a fix
     vulnerable_range: str | None = None  # e.g. "< 4.17.21"
     manifest_path: str | None = None  # e.g. "backend/pom.xml"
