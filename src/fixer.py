@@ -16,6 +16,9 @@ logger = logging.getLogger(__name__)
 _NPM_MANIFEST_NAMES = ("package.json", "package-lock.json")
 
 _BASE_FIX_PROMPT = (
+    "TASK: Fix the vulnerabilities listed below in order, starting with [1/N] now. "
+    "STEPS: 1) Open each ACTION target file:line. 2) Apply its EXACT FIX immediately. "
+    "3) Re-check only files you touched. DONE when every ACTION is applied, then stop. "
     "This is a non-interactive mode, so I approve for you to read, edit, and delete files, "
     "and to run normal terminal commands (such as npm install and build/test commands), "
     "but ONLY for files and operations within the current project directory (the .repos clone folder). "
@@ -92,7 +95,7 @@ def _agent_label(ai_agent_args: list[str], configured_model: str = "") -> str:
 _SNIPPET_CONTEXT_LINES = 3
 _SNIPPET_MAX_MATCHES = 2
 _SNIPPET_MAX_LINE_LEN = 200
-_MAX_DESC_CHARS = 1500
+_MAX_DESC_CHARS = 300
 
 
 def _format_snippet(all_lines: list[str], match_idx: int) -> str:
@@ -247,33 +250,31 @@ def _commit_paths(repo_path: Path, paths: list[str], message: str) -> bool:
     return result.returncode == 0
 
 
-def _prepare_vuln(repo_path: Path, vuln: Vulnerability) -> tuple[str, str]:
-    """Compute snippet for one vuln. Returns (prompt section, suggestion)."""
+def _prepare_vuln(
+    repo_path: Path, vuln: Vulnerability, idx: int | None = None, total: int | None = None
+) -> tuple[str, str]:
+    """Compute snippet for one vuln. Returns (prompt section, suggestion).
+
+    Section is ACTION-first: file + exact fix on the first lines so the agent
+    can start editing immediately; context (WHY/snippet/chain) follows.
+    """
     if vuln.source == "dependabot" and vuln.manifest_path and vuln.package_name:
         vuln.introduced_at = _find_manifest_lines(repo_path, vuln.manifest_path, vuln.package_name)
     elif vuln.source == "code_scanning" and vuln.affected_files:
         vuln.introduced_at = _read_code_snippet(repo_path, vuln.affected_files[0], vuln.start_line)
 
     affected = ", ".join(vuln.affected_files) if vuln.affected_files else "affected files"
-    description = vuln.description
-    if len(description) > _MAX_DESC_CHARS:
-        description = description[:_MAX_DESC_CHARS] + "... [truncated]"
+    # One-line WHY context (was a 1500-char paragraph).
+    why = " ".join(vuln.description.split())
+    if len(why) > _MAX_DESC_CHARS:
+        why = why[:_MAX_DESC_CHARS] + "... [truncated]"
     suggestion = ""
     if vuln.package_name and vuln.patched_version:
         suggestion = f"GitHub recommends upgrading {vuln.package_name} to version {vuln.patched_version}"
         suggestion += f" (vulnerable range: {vuln.vulnerable_range})." if vuln.vulnerable_range else "."
 
-    section = (
-        f"--- Vulnerability {vuln.advisory_id}: {vuln.title} ---\n"
-        f"Affected files: {affected}. "
-        f"{description}"
-    )
-    if suggestion:
-        section += f" {suggestion}"
-    if vuln.manifest_path:
-        section += f" The dependency is declared in {vuln.manifest_path}."
-    if vuln.introduced_at:
-        section += f" Exact introducing location:\n{vuln.introduced_at}"
+    # Direct, actionable instruction computed first.
+    file_ref = vuln.manifest_path or (vuln.affected_files[0] if vuln.affected_files else affected)
     if vuln.dependency_relationship == "transitive" and vuln.package_name:
         pkg = vuln.package_name
         parent = vuln.dependency_chain[-2] if vuln.dependency_chain and len(vuln.dependency_chain) >= 2 else None
@@ -284,8 +285,45 @@ def _prepare_vuln(repo_path: Path, vuln: Vulnerability) -> tuple[str, str]:
             action = f"Upgrade {who} to a version that includes fixed {pkg} {vuln.patched_version}"
         else:
             action = f"Upgrade {who} to a fixed version"
+    elif vuln.package_name and vuln.patched_version:
+        action = f"Upgrade {vuln.package_name} to {vuln.patched_version} in {file_ref}"
+    elif vuln.source == "code_scanning" and vuln.affected_files:
+        loc = f"{vuln.affected_files[0]}:{vuln.start_line}" if vuln.start_line else vuln.affected_files[0]
+        action = f"Fix the flagged code at {loc}"
+    elif vuln.manifest_path:
+        action = f"Fix {vuln.package_name or vuln.title} in {vuln.manifest_path}"
+    else:
+        action = f"Fix {vuln.title} in {affected}"
+
+    pos = f"[{idx}/{total}] " if idx is not None and total is not None else ""
+    section = (
+        f"--- Vulnerability {vuln.advisory_id}: {vuln.title} ---\n"
+        f"{pos}ACTION: {action}. FILE: {file_ref}. "
+        f"WHY ({vuln.severity}): {vuln.title}"
+    )
+    if vuln.vulnerable_range:
+        section += f" (vulnerable range: {vuln.vulnerable_range})"
+    section += f". {why}"
+    if suggestion:
+        section += f" {suggestion}"
+    if vuln.manifest_path:
+        section += f" The dependency is declared in {vuln.manifest_path}."
+    else:
+        section += f" Affected files: {affected}."
+    if vuln.introduced_at:
+        section += f" Open this location first:\n{vuln.introduced_at}"
+    if vuln.dependency_relationship == "transitive" and vuln.package_name:
+        pkg = vuln.package_name
+        parent = vuln.dependency_chain[-2] if vuln.dependency_chain and len(vuln.dependency_chain) >= 2 else None
+        who = f"the direct parent {parent}" if parent else "the direct dependency that introduces it"
+        if vuln.parent_version and parent:
+            action2 = f"Upgrade {who} to version {vuln.parent_version} (latest release)"
+        elif vuln.patched_version:
+            action2 = f"Upgrade {who} to a version that includes fixed {pkg} {vuln.patched_version}"
+        else:
+            action2 = f"Upgrade {who} to a fixed version"
         fix_instruction = (
-            f"{action}. "
+            f"{action2}. "
             f"Do NOT add {pkg} as a new direct dependency. "
             f"If no version of {who} includes the fix, STOP immediately — "
             f"do not try alternative fixes and do not edit other files. "
@@ -397,12 +435,11 @@ def _apply_fix_inner(
 
     prompt = (
         _BASE_FIX_PROMPT
-        + "You are an advanced programmer, and has a very strong security guard charactrer. "
         + f"Fix the following {len(agent_vulns)} security vulnerabilities in this repo. "
-        + "Fix ALL of them, then stop. "
+        + "Fix ALL of them in order, then stop. "
     )
-    for v in agent_vulns:
-        section, suggestion = _prepare_vuln(repo_path, v)
+    for i, v in enumerate(agent_vulns, start=1):
+        section, suggestion = _prepare_vuln(repo_path, v, idx=i, total=len(agent_vulns))
         prompt += "\n\n" + section
         _log_vuln_detail(v, suggestion)
     if deleted:
@@ -413,6 +450,7 @@ def _apply_fix_inner(
         )
 
     logger.info(f"Invoking agent {_agent_label(config.ai_agent_args, config.ai_agent_model)} for batch [{tag}]{position}...")
+    logger.info(f"Prompt for batch [{tag}]{position}:\n--- PROMPT START ---\n{prompt}\n--- PROMPT END ---")
 
     cmd: list[str] = []
     for a in config.ai_agent_args:

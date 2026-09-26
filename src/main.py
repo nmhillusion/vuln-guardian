@@ -42,10 +42,14 @@ class _ColorFormatter(logging.Formatter):
         if not self.use_color:
             return text
         color = self.COLORS.get(record.levelno, "")
-        if record.getMessage().startswith("====="):
+        if record.getMessage().startswith("NEXT REPO"):
+            color = "\033[38;5;214m"  # gold-orange for next-repo banner
+        elif record.getMessage().startswith("====="):
             color = "\033[35m"  # magenta for START/END fix banners
         elif record.getMessage().startswith("SKIP"):
             color = "\033[38;5;208m"  # orange for SKIP lines
+        elif record.getMessage().startswith("Prompt for batch"):
+            color = "\033[38;5;129m"  # violet for AI-agent prompt dump
         return f"{color}{text}{self.RESET}"
 
 
@@ -266,7 +270,8 @@ def main(argv: list[str] | None = None) -> None:
         result = RunResult()
         result.repos_scanned = len(repos)
 
-        for repo_full_name in repos:
+        for idx, repo_full_name in enumerate(repos):
+            logger.info(f"NEXT REPO [{idx+1}/{len(repos)}]: {repo_full_name}")
             vulns = fetch_repo_advisories(client, repo_full_name)
             result.vulns_found += len(vulns)
             result.pending_prs.extend(fetch_open_tool_prs(client, repo_full_name))
