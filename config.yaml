@@ -4,3 +4,4 @@ report_path: "report.html"
 ai_agent_args: ["C:\\Workspace\\programs\\code\\node-v24\\kilo.cmd", "run", "--auto", "-m", "{model}", "--variant", "minimal", "--dir", "{repo_dir}"]
 ai_agent_model: "kilo/stepfun/step-3.7-flash:free"
 ai_agent_stdin: true
+state_path: "vuln-guardian-state.json"

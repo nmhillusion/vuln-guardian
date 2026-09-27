@@ -3,7 +3,7 @@ import subprocess
 from pathlib import Path
 import pytest
 from unittest.mock import patch, MagicMock
-from src.repo import clone_or_update, detect_default_branch, branch_exists, create_branch, checkout
+from src.repo import clone_or_update, detect_default_branch, update_default_branch, branch_exists, create_branch, checkout
 
 
 def test_clone_or_update_clones_new_repo(tmp_path):
@@ -90,3 +90,23 @@ def test_clone_or_update_no_subprocess_for_malicious_name(tmp_path):
         with pytest.raises(ValueError):
             clone_or_update(str(tmp_path), "evilorg/..")
         mock_run.assert_not_called()
+
+
+def test_update_default_branch_syncs_to_origin(tmp_path):
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stderr="")
+        update_default_branch(tmp_path, "main")
+        assert mock_run.call_count == 3
+        cmds = [c.args[0] for c in mock_run.call_args_list]
+        assert cmds[0][-2:] == ["checkout", "main"]
+        assert cmds[1][-3:] == ["fetch", "origin", "main"]
+        assert cmds[2][-3:] == ["reset", "--hard", "origin/main"]
+
+
+def test_update_default_branch_fails_loudly(tmp_path):
+    ok = MagicMock(returncode=0, stderr="")
+    fail = MagicMock(returncode=1, stderr="fetch failed")
+    with patch("subprocess.run", side_effect=[ok, fail]) as mock_run:
+        with pytest.raises(RuntimeError, match="Failed to fetch"):
+            update_default_branch(tmp_path, "main")
+        assert mock_run.call_count == 2

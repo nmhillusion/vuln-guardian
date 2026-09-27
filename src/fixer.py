@@ -3,13 +3,17 @@ from __future__ import annotations
 
 import logging
 import queue
+import re
 import subprocess
 import threading
 import time
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from src.config import Config
+from src.maven import is_stable_version, version_exists_on_central
 from src.models import Vulnerability
+from src.state import is_definitive_refusal, record_batch_unfixable
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +36,17 @@ _BASE_FIX_PROMPT = (
     "Act after minimal investigation; use at most about 10 tool calls; "
     "skip builds and tests unless your edit touches build logic. "
     "Do not inspect wrapper or build-infrastructure files (gradle-wrapper.properties, CI configs, repository settings). "
+    "NEVER add a new dependency declaration (new implementation()/api()/compileOnly() line in Gradle, "
+    "new <dependency> in Maven, new entry in package.json/requirements.txt). "
+    "Only upgrade versions in existing declarations and do NOT add constraints. "
+    "If a fix would require a new direct dependency or a new constraint, STOP and end with: CANNOT FIX: <reason>. "
+    "Only upgrade to stable releases (numeric versions like X.Y.Z, no suffix). "
+    "NEVER upgrade to milestone, snapshot, alpha, beta, RC, M-, -eap, -preview, or -SNAPSHOT versions "
+    "(e.g. 7.1.0-M2, 5.7-alpha1). "
+    "If the only available fix is a pre-release, STOP and end with: CANNOT FIX: only pre-release fix available. "
+    "Use only dependency versions stated in this prompt. Never invent a version number: "
+    "if no stated version fits your current minor line, upgrade to the lowest stated patched version "
+    "even across minor/major lines, or end with: CANNOT FIX: <reason>. "
 )
 
 _TRANSITIVE_DEP_RULE = (
@@ -274,6 +289,10 @@ def _prepare_vuln(
         suggestion += f" (vulnerable range: {vuln.vulnerable_range})." if vuln.vulnerable_range else "."
 
     # Direct, actionable instruction computed first.
+    # Never push a pre-release parent version into the prompt: the agent obeys
+    # the explicit ACTION over the stable-only rule, so drop it and fall back.
+    if vuln.parent_version and not is_stable_version(vuln.parent_version):
+        vuln.parent_version = None
     file_ref = vuln.manifest_path or (vuln.affected_files[0] if vuln.affected_files else affected)
     if vuln.dependency_relationship == "transitive" and vuln.package_name:
         pkg = vuln.package_name
@@ -367,6 +386,98 @@ def _fix_position(fix_number: int | None, max_fixes: int | None) -> str:
     return ""
 
 
+_GRADLE_COORD_RE = re.compile(r"""["']([A-Za-z0-9_.\-]+):([A-Za-z0-9_.\-]+):([A-Za-z0-9_.\-+]+)["']""")
+
+
+def _xml_local(tag: str) -> str:
+    """Strip namespace: '{http://...}dependency' -> 'dependency'."""
+    return tag.rsplit("}", 1)[-1]
+
+
+def _maven_versions_from_gradle(text: str) -> dict[tuple[str, str], str]:
+    """{(group, artifact): version} from implementation("g:a:v") declarations."""
+    return {(m.group(1), m.group(2)): m.group(3) for m in _GRADLE_COORD_RE.finditer(text)}
+
+
+def _maven_versions_from_pom(text: str) -> dict[tuple[str, str], str]:
+    """{(group, artifact): version} from pom <dependency> blocks, resolving ${properties}."""
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError:
+        return {}
+    props: dict[str, str] = {}
+    for el in root.iter():
+        if _xml_local(el.tag) == "properties":
+            for child in el:
+                if child.text and child.text.strip():
+                    props[_xml_local(child.tag)] = child.text.strip()
+
+    def _resolve(value: str) -> str:
+        value = value.strip()
+        if value.startswith("${") and value.endswith("}"):
+            return props.get(value[2:-1], value)
+        return value
+
+    out: dict[tuple[str, str], str] = {}
+    for dep in root.iter():
+        if _xml_local(dep.tag) != "dependency":
+            continue
+        group = artifact = version = None
+        for child in dep:
+            name = _xml_local(child.tag)
+            if child.text is None:
+                continue
+            if name == "groupId":
+                group = child.text.strip()
+            elif name == "artifactId":
+                artifact = child.text.strip()
+            elif name == "version":
+                version = _resolve(child.text)
+        if group and artifact and version and not version.startswith("${"):
+            out[(group, artifact)] = version
+    return out
+
+
+def _snapshot_manifest_versions(repo_path: Path, manifest_path: str) -> dict[tuple[str, str], str]:
+    """Read {(group, artifact): version} from a manifest file. {} when unreadable/unsupported."""
+    target = repo_path / manifest_path
+    if not target.is_file():
+        return {}
+    try:
+        text = target.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    if manifest_path.endswith(".xml"):
+        return _maven_versions_from_pom(text)
+    if manifest_path.endswith(".gradle") or manifest_path.endswith(".gradle.kts"):
+        return _maven_versions_from_gradle(text)
+    return {}
+
+
+def _find_nonexistent_bumped_version(
+    repo_path: Path,
+    pre_snapshots: dict[str, dict[tuple[str, str], str]],
+    manifest_paths: list[str | None],
+) -> tuple[str, str, str] | None:
+    """Diff pre-agent snapshots against current files; verify each NEW version on Central.
+
+    Returns (group, artifact, version) for the first bumped version confirmed
+    missing on Maven Central, else None. Unreachable Central (unknown) fails
+    open with a warning so offline runs are never blocked.
+    """
+    for manifest in dict.fromkeys(m for m in manifest_paths if m):
+        post = _snapshot_manifest_versions(repo_path, manifest)
+        if not post:
+            continue
+        pre = pre_snapshots.get(manifest, {})
+        for (group, artifact), version in post.items():
+            if pre.get((group, artifact)) == version:
+                continue
+            if version_exists_on_central(group, artifact, version) is False:
+                return group, artifact, version
+    return None
+
+
 def apply_fix(
     config: Config,
     repo_path: Path,
@@ -381,6 +492,10 @@ def apply_fix(
     ok, reason = _apply_fix_inner(config, repo_path, vulns, fix_number, max_fixes)
     outcome = "FIXED" if ok else (f"NO FIX — {reason}" if reason else "NO FIX")
     logger.info(f"===== END{position} fix batch [{ids}]: {outcome} =====")
+    if not ok and reason and is_definitive_refusal(reason):
+        record_batch_unfixable(
+            config.state_path, vulns[0].repo_full_name, [v.advisory_id for v in vulns], reason
+        )
     return ok
 
 
@@ -452,6 +567,9 @@ def _apply_fix_inner(
     logger.info(f"Invoking agent {_agent_label(config.ai_agent_args, config.ai_agent_model)} for batch [{tag}]{position}...")
     logger.info(f"Prompt for batch [{tag}]{position}:\n--- PROMPT START ---\n{prompt}\n--- PROMPT END ---")
 
+    agent_manifests = [v.manifest_path for v in agent_vulns if v.manifest_path]
+    pre_versions = {m: _snapshot_manifest_versions(repo_path, m) for m in dict.fromkeys(agent_manifests)}
+
     cmd: list[str] = []
     for a in config.ai_agent_args:
         if a == "{prompt}":
@@ -494,6 +612,15 @@ def _apply_fix_inner(
             logger.warning(f"Agent cannot fix batch [{tag}]: {marker}")
             return lockfix_committed, ("" if lockfix_committed else f"cannot fix: {marker}")
         return lockfix_committed, ("" if lockfix_committed else "no changes produced")
+
+    bad = _find_nonexistent_bumped_version(repo_path, pre_versions, agent_manifests)
+    if bad:
+        group, artifact, version = bad
+        logger.warning(
+            f"Agent bumped {group}:{artifact} to {version}, which does not exist on Maven Central"
+            f" — refusing to commit batch [{tag}]"
+        )
+        return False, f"nonexistent version {version} for {group}:{artifact}"
 
     commit_msg = f"fix: {len(agent_vulns)} vulnerabilities ({', '.join(v.advisory_id for v in agent_vulns)})"
     if not _commit_changes(repo_path, commit_msg):

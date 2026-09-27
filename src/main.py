@@ -13,8 +13,9 @@ from src.config import load_config, Config
 from src.github_client import GitHubClient
 from src.fetcher import list_repos, fetch_repo_advisories
 from src.models import RunResult, Vulnerability
-from src.repo import clone_or_update, detect_default_branch, branch_exists, create_branch, checkout
+from src.repo import clone_or_update, detect_default_branch, update_default_branch, branch_exists, create_branch, checkout
 from src.fixer import apply_fix
+from src.state import is_unfixable_cached, load_state, save_state
 from src.pr import create_pull_request, pr_exists_for_branch, fetch_open_tool_prs
 from src.reporter import generate_report
 
@@ -63,7 +64,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--no-browser", action="store_true", help="Don't auto-open the HTML report")
     parser.add_argument("--no-color", action="store_true", help="Disable colored log output")
     parser.add_argument("--log-file", type=str, default="vuln-guardian.log", help="Log file path (reset every run, empty disables)")
-    parser.add_argument("--max-fixes", type=int, default=5, help="Max fix batches per run (default: 5)")
+    parser.add_argument("--max-fixes", type=int, default=5, help="Max successful fixes (created PRs) per run (default: 5)")
     parser.add_argument("--batch-size", type=int, default=5, help="Max vulnerabilities per fix batch/PR (default: 5)")
     parser.add_argument("--yes", action="store_true", help="Auto-approve prompts (e.g. clone directory creation)")
     return parser.parse_args(argv)
@@ -136,9 +137,25 @@ def process_repo(
     default_branch = detect_default_branch(repo_path)
     logger.info(f"Default branch for {repo_full_name}: {default_branch}")
 
+    try:
+        update_default_branch(repo_path, default_branch)
+    except Exception as e:
+        msg = f"Failed to sync {default_branch} to latest for {repo_full_name}: {e}"
+        logger.error(msg)
+        result.errors.append(msg)
+        return
+    logger.info(f"Synced {default_branch} to latest origin for {repo_full_name}")
+
+    state = load_state(config.state_path)
+
     # Pre-filter vulns already handled (previous runs / one-by-one era branches).
     pending: list[Vulnerability] = []
     for vuln in vulns:
+        cached, cached_reason = is_unfixable_cached(state, repo_full_name, vuln.advisory_id)
+        if cached:
+            logger.info(f"Skipping {vuln.advisory_id} — unfixable (cached, rescans after 3d)")
+            _record_skip(result, repo_full_name, [vuln], f"unfixable (cached): {cached_reason}")
+            continue
         legacy_branch = f"fix/{vuln.advisory_id}"
         if pr_exists_for_branch(client, repo_full_name, legacy_branch):
             logger.info(f"PR already exists for {vuln.advisory_id}, skipping")
@@ -151,8 +168,8 @@ def process_repo(
         pending.append(vuln)
 
     for batch in _batch_vulns(pending, batch_size):
-        if result.fixes_attempted >= max_fixes:
-            logger.info(f"Reached max fix attempts ({max_fixes}), stopping")
+        if result.prs_created >= max_fixes:
+            logger.info(f"Reached max successful fixes ({max_fixes}), stopping")
             break
 
         ids = sorted(v.advisory_id for v in batch)
@@ -287,8 +304,8 @@ def main(argv: list[str] | None = None) -> None:
                 continue
 
             process_repo(client, config, repo_full_name, vulns, result, args.max_fixes, args.batch_size)
-            if result.fixes_attempted >= args.max_fixes:
-                logger.info(f"Reached max fix attempts ({args.max_fixes}), stopping run")
+            if result.prs_created >= args.max_fixes:
+                logger.info(f"Reached max successful fixes ({args.max_fixes}), stopping run")
                 break
 
         report_html = generate_report(result, config.report_path)

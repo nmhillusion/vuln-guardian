@@ -15,6 +15,7 @@ class Config:
     ai_agent_args: list[str] = field(default_factory=lambda: ["kilo", "run", "--auto", "--dir", "{repo_dir}", "{prompt}"])
     ai_agent_model: str = ""
     ai_agent_stdin: bool = False
+    state_path: str = ""
 
 
 def load_config(config_path: str = "config.yaml") -> Config:
@@ -36,5 +37,6 @@ def load_config(config_path: str = "config.yaml") -> Config:
         ai_agent_args=data.get("ai_agent_args", ["kilo", "run", "--auto", "--dir", "{repo_dir}", "{prompt}"]),
         ai_agent_model=data.get("ai_agent_model", ""),
         ai_agent_stdin=bool(data.get("ai_agent_stdin", False)),
+        state_path=data.get("state_path", ""),
         github_pat=github_pat,
     )

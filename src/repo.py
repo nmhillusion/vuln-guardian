@@ -80,6 +80,24 @@ def detect_default_branch(repo_path: Path) -> str:
     return "main"
 
 
+def update_default_branch(repo_path: Path, default_branch: str) -> None:
+    """Sync the local default branch to the latest origin state.
+
+    Checks out the default branch, fetches it, and hard-resets to
+    origin/<default> so every fix starts from the latest source.
+    Raises RuntimeError on failure — callers must not fix on stale code.
+    """
+    result = _run_git(repo_path, "checkout", default_branch)
+    if result.returncode != 0:
+        raise RuntimeError(f"Failed to checkout {default_branch}: {result.stderr}")
+    result = _run_git(repo_path, "fetch", "origin", default_branch)
+    if result.returncode != 0:
+        raise RuntimeError(f"Failed to fetch origin/{default_branch}: {result.stderr}")
+    result = _run_git(repo_path, "reset", "--hard", f"origin/{default_branch}")
+    if result.returncode != 0:
+        raise RuntimeError(f"Failed to reset to origin/{default_branch}: {result.stderr}")
+
+
 def branch_exists(repo_path: Path, branch_name: str) -> bool:
     """Check if a branch exists locally."""
     result = _run_git(repo_path, "branch")

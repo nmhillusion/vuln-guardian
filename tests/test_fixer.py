@@ -395,6 +395,30 @@ def test_apply_fix_cannot_fix_marker_reported(tmp_path, caplog):
     assert "NO FIX — cannot fix: parent has no fixed release" in caplog.text
 
 
+def test_apply_fix_records_definitive_refusal_to_state(tmp_path):
+    import json
+    state_path = tmp_path / "state.json"
+    config = _make_config(state_path=str(state_path))
+    vuln = _make_vuln()
+    with patch("subprocess.Popen") as mock_popen, patch("subprocess.run") as mock_run:
+        mock_popen.return_value = _fake_proc(lines=("CANNOT FIX: parent has no fixed release\n",))
+        mock_run.return_value = MagicMock(returncode=0)
+        with patch("src.fixer._has_changes", return_value=False):
+            assert apply_fix(config, tmp_path, [vuln]) is False
+    saved = json.loads(state_path.read_text(encoding="utf-8"))
+    assert saved["test-org/repo1"]["GHSA-test-1234"]["reason"] == "cannot fix: parent has no fixed release"
+
+
+def test_apply_fix_no_state_write_when_disabled_or_infra_failure(tmp_path):
+    config = _make_config()  # state_path defaults to "" (disabled)
+    vuln = _make_vuln()
+    with patch("subprocess.Popen") as mock_popen, patch("subprocess.run") as mock_run:
+        mock_popen.return_value = _fake_proc()
+        mock_run.return_value = MagicMock(returncode=1)
+        assert apply_fix(config, tmp_path, [vuln]) is False
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_apply_fix_repo_dir_substituted(tmp_path):
     config = _make_config(ai_agent_args=["kilo", "run", "--auto", "--dir", "{repo_dir}", "{prompt}"])
     vuln = _make_vuln()
@@ -427,6 +451,90 @@ def test_apply_fix_parent_version_in_rule(tmp_path):
             apply_fix(config, tmp_path, [vuln])
     prompt = _prompt_of_last_agent_call(mock_popen, config)
     assert "Upgrade the direct parent org.owasp:dependency-check-core@9.2.0 to version 9.3.0 (latest release)" in prompt
+
+
+def test_apply_fix_milestone_parent_version_never_in_prompt(tmp_path):
+    config = _make_config()
+    vuln = _make_dep_vuln()
+    vuln.parent_version = "7.1.0-M2"
+    vuln.dependency_chain = [
+        "pkg:github/o/r@main",
+        "org.springframework:spring-orm@6.2.14",
+        "org.springframework:spring-core@6.2.14",
+    ]
+    vuln.package_name = "org.springframework:spring-core"
+    vuln.patched_version = None
+    with patch("subprocess.Popen") as mock_popen, patch("subprocess.run") as mock_run:
+        mock_popen.return_value = _fake_proc()
+        mock_run.return_value = MagicMock(returncode=0)
+        with patch("src.fixer._has_changes", return_value=True):
+            apply_fix(config, tmp_path, [vuln])
+    prompt = _prompt_of_last_agent_call(mock_popen, config)
+    assert "to version 7.1.0-M2" not in prompt
+    assert "Upgrade the direct parent org.springframework:spring-orm@6.2.14 to a fixed version" in prompt
+
+
+def test_maven_versions_from_pom_with_property():
+    from src.fixer import _maven_versions_from_pom
+    pom = """<project><properties><spring.version>6.2.19</spring.version></properties>
+    <dependencies><dependency><groupId>org.springframework</groupId>
+    <artifactId>spring-core</artifactId><version>${spring.version}</version>
+    </dependency></dependencies></project>"""
+    assert _maven_versions_from_pom(pom) == {("org.springframework", "spring-core"): "6.2.19"}
+
+
+def test_maven_versions_from_gradle():
+    from src.fixer import _maven_versions_from_gradle
+    text = 'implementation("org.springframework:spring-jdbc:6.2.19")\n'
+    assert _maven_versions_from_gradle(text) == {("org.springframework", "spring-jdbc"): "6.2.19"}
+
+
+def test_apply_fix_refuses_nonexistent_bumped_version(tmp_path):
+    backend = tmp_path / "backend"
+    backend.mkdir()
+    (backend / "pom.xml").write_text(_MAVEN_POM, encoding="utf-8")
+    config = _make_config()
+    vuln = _make_dep_vuln()
+
+    def _agent_writes_fake_version(*args, **kwargs):
+        (backend / "pom.xml").write_text(
+            _MAVEN_POM.replace("<version>1.41.0</version>", "<version>9.9.9-fake</version>"),
+            encoding="utf-8",
+        )
+        return _fake_proc()
+
+    with patch("subprocess.Popen", side_effect=_agent_writes_fake_version), \
+         patch("subprocess.run") as mock_run, \
+         patch("src.fixer.version_exists_on_central", return_value=False), \
+         patch("src.fixer._commit_changes") as mock_commit:
+        mock_run.return_value = MagicMock(returncode=0)
+        result = apply_fix(config, tmp_path, [vuln])
+    assert result is False
+    mock_commit.assert_not_called()
+
+
+def test_apply_fix_allows_existing_bumped_version(tmp_path):
+    backend = tmp_path / "backend"
+    backend.mkdir()
+    (backend / "pom.xml").write_text(_MAVEN_POM, encoding="utf-8")
+    config = _make_config()
+    vuln = _make_dep_vuln()
+
+    def _agent_writes_real_version(*args, **kwargs):
+        (backend / "pom.xml").write_text(
+            _MAVEN_POM.replace("<version>1.41.0</version>", "<version>1.42.0</version>"),
+            encoding="utf-8",
+        )
+        return _fake_proc()
+
+    with patch("subprocess.Popen", side_effect=_agent_writes_real_version), \
+         patch("subprocess.run") as mock_run, \
+         patch("src.fixer.version_exists_on_central", return_value=True), \
+         patch("src.fixer._commit_changes", return_value=True) as mock_commit:
+        mock_run.return_value = MagicMock(returncode=0)
+        result = apply_fix(config, tmp_path, [vuln])
+    assert result is True
+    mock_commit.assert_called_once()
 
 
 def test_apply_fix_streams_agent_output_to_log(tmp_path, caplog):

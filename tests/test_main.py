@@ -2,8 +2,9 @@
 import logging
 import pytest
 from unittest.mock import patch, MagicMock
-from src.main import main, _batch_vulns, _batch_branch_name, _ColorFormatter
-from src.models import Vulnerability
+from src.main import main, process_repo, _batch_vulns, _batch_branch_name, _ColorFormatter
+from src.models import RunResult, Vulnerability
+from src.state import record_unfixable
 
 
 def _record(level, msg):
@@ -111,7 +112,7 @@ def test_main_stops_after_max_fixes(tmp_path):
     repos = [f"test-org/repo{i}" for i in range(7)]
 
     def fake_process_repo(client, config, repo_full_name, vulns, result, max_fixes=5, batch_size=5):
-        result.fixes_attempted += 1
+        result.prs_created += 1
 
     with patch("src.main.load_config") as mock_config, \
          patch("src.main.GitHubClient") as mock_client_cls, \
@@ -131,6 +132,34 @@ def test_main_stops_after_max_fixes(tmp_path):
         mock_fetch.side_effect = lambda client, repo: [_make_vuln(repo, f"GHSA-{repo.split('/')[-1]}")]
         main(["--config", str(config_path)])
         assert mock_fetch.call_count == 5
+
+
+def test_main_scans_all_when_attempts_produce_no_prs(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text('org: "test-org"\nclone_dir: ".repos"\nreport_path: "report.html"\nai_agent_args: ["kilo", "run", "--auto", "{prompt}"]\n')
+    repos = [f"test-org/repo{i}" for i in range(7)]
+
+    def fake_process_repo(client, config, repo_full_name, vulns, result, max_fixes=5, batch_size=5):
+        result.fixes_attempted += 1
+
+    with patch("src.main.load_config") as mock_config, \
+         patch("src.main.GitHubClient") as mock_client_cls, \
+         patch("src.main.list_repos", return_value=repos), \
+         patch("src.main.fetch_repo_advisories") as mock_fetch, \
+         patch("src.main.process_repo", side_effect=fake_process_repo), \
+         patch("src.main.webbrowser"), \
+         patch("builtins.input", return_value="y"), \
+         patch("src.main.generate_report", return_value="<html></html>"):
+        mock_config.return_value = MagicMock(
+            org="test-org",
+            clone_dir=str(tmp_path / ".repos"),
+            report_path=str(tmp_path / "report.html"),
+            github_pat="ghp_test",
+        )
+        mock_client_cls.return_value = MagicMock()
+        mock_fetch.side_effect = lambda client, repo: [_make_vuln(repo, f"GHSA-{repo.split('/')[-1]}")]
+        main(["--config", str(config_path)])
+        assert mock_fetch.call_count == 7
 
 
 def _fix_mode_config(tmp_path):
@@ -186,3 +215,33 @@ def test_main_yes_skips_clone_dir_prompt(tmp_path):
     mock_input = _run_fix_mode(tmp_path, ["--yes"])
     mock_input.assert_not_called()
     assert (tmp_path / "clones").is_dir()
+
+
+def test_process_repo_skips_cached_unfixable_without_agent(tmp_path):
+    from src.config import Config
+    state_path = str(tmp_path / "state.json")
+    config = Config(
+        org="test-org",
+        clone_dir=str(tmp_path / "clones"),
+        report_path=str(tmp_path / "report.html"),
+        github_pat="ghp_test",
+        state_path=state_path,
+    )
+    vuln = _make_vuln("test-org/repo1", "GHSA-cached")
+    state = {}
+    record_unfixable(state, "test-org/repo1", "GHSA-cached", "cannot fix: no release")
+    from src.state import save_state
+    save_state(state_path, state)
+    result = RunResult()
+    with patch("src.main.clone_or_update", return_value=tmp_path), \
+         patch("src.main.detect_default_branch", return_value="main"), \
+         patch("src.main.update_default_branch"), \
+         patch("src.main.pr_exists_for_branch", return_value=False), \
+         patch("src.main.branch_exists", return_value=False), \
+         patch("src.main.create_branch", side_effect=AssertionError("must not create branch")), \
+         patch("src.main.apply_fix", side_effect=AssertionError("must not invoke agent")):
+        process_repo(MagicMock(), config, "test-org/repo1", [vuln], result)
+    assert result.skipped == 1
+    assert result.fixes_attempted == 0
+    assert result.prs_created == 0
+    assert "cached" in result.skipped_items[0]["reason"]
