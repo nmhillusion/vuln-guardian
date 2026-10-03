@@ -49,7 +49,7 @@ def clone_or_update(clone_dir: str, repo_full_name: str, token: str = "") -> Pat
     if repo_path.exists():
         logger.info(f"Updating existing repo: {repo_full_name}")
         _run_git(repo_path, "remote", "set-url", "origin", f"{auth_prefix}{repo_full_name}.git")
-        _run_git(repo_path, "fetch", "--all")
+        _run_git(repo_path, "fetch", "--all", "--prune")
         _run_git(repo_path, "pull")
     else:
         logger.info(f"Cloning {repo_full_name}...")
@@ -90,7 +90,7 @@ def update_default_branch(repo_path: Path, default_branch: str) -> None:
     result = _run_git(repo_path, "checkout", default_branch)
     if result.returncode != 0:
         raise RuntimeError(f"Failed to checkout {default_branch}: {result.stderr}")
-    result = _run_git(repo_path, "fetch", "origin", default_branch)
+    result = _run_git(repo_path, "fetch", "--prune", "origin", default_branch)
     if result.returncode != 0:
         raise RuntimeError(f"Failed to fetch origin/{default_branch}: {result.stderr}")
     result = _run_git(repo_path, "reset", "--hard", f"origin/{default_branch}")
@@ -106,6 +106,29 @@ def branch_exists(repo_path: Path, branch_name: str) -> bool:
             if branch_name in line:
                 return True
     return False
+
+
+def remote_branch_exists(repo_path: Path, branch_name: str) -> bool:
+    """Check if origin/<branch> exists (after prune, missing means deleted on GitHub)."""
+    result = _run_git(repo_path, "rev-parse", "--verify", f"origin/{branch_name}")
+    return result.returncode == 0
+
+
+def sync_prune_fix_branch(repo_path: Path, branch_name: str) -> bool:
+    """Delete stale local fix/* branch whose remote is gone. Returns True if pruned.
+
+    Only touches fix/* branches. Returns False when nothing to do (no local
+    branch, remote still exists, or non-fix branch).
+    """
+    if not branch_name.startswith("fix/"):
+        return False
+    if not branch_exists(repo_path, branch_name):
+        return False
+    if remote_branch_exists(repo_path, branch_name):
+        return False
+    logger.info(f"Pruning stale local branch {branch_name} (remote deleted)")
+    _run_git(repo_path, "branch", "-D", branch_name)
+    return True
 
 
 def create_branch(repo_path: Path, branch_name: str, base_branch: str) -> None:

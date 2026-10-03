@@ -99,7 +99,7 @@ def test_update_default_branch_syncs_to_origin(tmp_path):
         assert mock_run.call_count == 3
         cmds = [c.args[0] for c in mock_run.call_args_list]
         assert cmds[0][-2:] == ["checkout", "main"]
-        assert cmds[1][-3:] == ["fetch", "origin", "main"]
+        assert cmds[1][-4:] == ["fetch", "--prune", "origin", "main"]
         assert cmds[2][-3:] == ["reset", "--hard", "origin/main"]
 
 
@@ -110,3 +110,43 @@ def test_update_default_branch_fails_loudly(tmp_path):
         with pytest.raises(RuntimeError, match="Failed to fetch"):
             update_default_branch(tmp_path, "main")
         assert mock_run.call_count == 2
+
+
+def test_clone_or_update_prunes_deleted_branches(tmp_path):
+    from src.repo import clone_or_update as _clone
+    repo_dir = tmp_path / "myrepo"
+    repo_dir.mkdir()
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0)
+        _clone(str(tmp_path), "myorg/myrepo")
+        cmds = [c.args[0] for c in mock_run.call_args_list]
+        assert any(cmd[-3:] == ["fetch", "--all", "--prune"] for cmd in cmds)
+
+
+def test_update_default_branch_prunes(tmp_path):
+    from src.repo import update_default_branch as _update
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stderr="")
+        _update(tmp_path, "main")
+        cmds = [c.args[0] for c in mock_run.call_args_list]
+        assert cmds[1][-4:] == ["fetch", "--prune", "origin", "main"]
+
+
+def test_sync_prunes_stale_local_fix_branch(tmp_path):
+    from src import repo as _repo
+    with patch.object(_repo, "branch_exists", return_value=True), \
+         patch.object(_repo, "remote_branch_exists", return_value=False), \
+         patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0)
+        assert _repo.sync_prune_fix_branch(tmp_path, "fix/batch-abc123") is True
+        cmds = [c.args[0] for c in mock_run.call_args_list]
+        assert any(cmd[-3:] == ["branch", "-D", "fix/batch-abc123"] for cmd in cmds)
+
+
+def test_sync_keeps_live_local_fix_branch(tmp_path):
+    from src import repo as _repo
+    with patch.object(_repo, "branch_exists", return_value=True), \
+         patch.object(_repo, "remote_branch_exists", return_value=True), \
+         patch("subprocess.run") as mock_run:
+        assert _repo.sync_prune_fix_branch(tmp_path, "fix/batch-abc123") is False
+        mock_run.assert_not_called()

@@ -13,7 +13,7 @@ from src.config import load_config, Config
 from src.github_client import GitHubClient
 from src.fetcher import list_repos, fetch_repo_advisories
 from src.models import RunResult, Vulnerability
-from src.repo import clone_or_update, detect_default_branch, update_default_branch, branch_exists, create_branch, checkout
+from src.repo import clone_or_update, detect_default_branch, update_default_branch, branch_exists, create_branch, checkout, sync_prune_fix_branch
 from src.fixer import apply_fix
 from src.state import is_unfixable_cached, load_state, save_state
 from src.pr import create_pull_request, pr_exists_for_branch, fetch_open_tool_prs
@@ -162,9 +162,12 @@ def process_repo(
             _record_skip(result, repo_full_name, [vuln], "PR already exists")
             continue
         if branch_exists(repo_path, legacy_branch):
-            logger.info(f"Branch {legacy_branch} already exists, skipping")
-            _record_skip(result, repo_full_name, [vuln], "branch already exists")
-            continue
+            if sync_prune_fix_branch(repo_path, legacy_branch):
+                logger.info(f"Pruned stale {legacy_branch} (deleted on GitHub), retrying")
+            else:
+                logger.info(f"Branch {legacy_branch} already exists, skipping")
+                _record_skip(result, repo_full_name, [vuln], "branch already exists")
+                continue
         pending.append(vuln)
 
     for batch in _batch_vulns(pending, batch_size):
@@ -182,9 +185,12 @@ def process_repo(
             continue
 
         if branch_exists(repo_path, branch_name):
-            logger.info(f"Branch {branch_name} already exists, skipping batch")
-            _record_skip(result, repo_full_name, batch, "batch branch already exists", branch=branch_name)
-            continue
+            if sync_prune_fix_branch(repo_path, branch_name):
+                logger.info(f"Pruned stale {branch_name} (deleted on GitHub), retrying batch")
+            else:
+                logger.info(f"Branch {branch_name} already exists, skipping batch")
+                _record_skip(result, repo_full_name, batch, "batch branch already exists", branch=branch_name)
+                continue
 
         try:
             create_branch(repo_path, branch_name, default_branch)
