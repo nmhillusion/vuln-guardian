@@ -691,3 +691,61 @@ def test_apply_fix_refuses_unknown_version_fail_closed(tmp_path):
         result = apply_fix(config, tmp_path, [vuln])
     assert result is False
     mock_commit.assert_not_called()
+
+
+def test_apply_fix_refuses_added_block_new_dependency(tmp_path):
+    from src.fixer import apply_fix_detail
+    backend = tmp_path / "backend"
+    backend.mkdir()
+    (backend / "pom.xml").write_text(_MAVEN_POM, encoding="utf-8")
+    config = _make_config()
+    vuln = _make_dep_vuln()
+
+    def _agent_adds_dep(*args, **kwargs):
+        (backend / "pom.xml").write_text(
+            _MAVEN_POM.replace(
+                "</dependencies>",
+                "        <dependency>\n"
+                "            <groupId>org.apache.calcite.avatica</groupId>\n"
+                "            <artifactId>avatica-core</artifactId>\n"
+                "            <version>1.29.0</version>\n"
+                "        </dependency>\n    </dependencies>",
+            ),
+            encoding="utf-8",
+        )
+        return _fake_proc()
+
+    with patch("subprocess.Popen", side_effect=_agent_adds_dep), \
+         patch("subprocess.run") as mock_run, \
+         patch("src.fixer.version_exists_on_central", return_value=True), \
+         patch("src.fixer._commit_changes") as mock_commit:
+        mock_run.return_value = MagicMock(returncode=0)
+        ok, reason = apply_fix_detail(config, tmp_path, [vuln])
+    assert ok is False
+    assert "added block" in reason
+    mock_commit.assert_not_called()
+
+
+def test_apply_fix_allows_modify_only_version_bump(tmp_path):
+    from src.fixer import apply_fix_detail
+    backend = tmp_path / "backend"
+    backend.mkdir()
+    (backend / "pom.xml").write_text(_MAVEN_POM, encoding="utf-8")
+    config = _make_config()
+    vuln = _make_dep_vuln()
+
+    def _agent_bumps_only(*args, **kwargs):
+        (backend / "pom.xml").write_text(
+            _MAVEN_POM.replace("<version>1.41.0</version>", "<version>1.42.0</version>"),
+            encoding="utf-8",
+        )
+        return _fake_proc()
+
+    with patch("subprocess.Popen", side_effect=_agent_bumps_only), \
+         patch("subprocess.run") as mock_run, \
+         patch("src.fixer.version_exists_on_central", return_value=True), \
+         patch("src.fixer._commit_changes", return_value=True) as mock_commit:
+        mock_run.return_value = MagicMock(returncode=0)
+        ok, reason = apply_fix_detail(config, tmp_path, [vuln])
+    assert ok is True
+    mock_commit.assert_called_once()

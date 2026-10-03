@@ -61,7 +61,11 @@ def is_definitive_refusal(reason: str) -> bool:
     no-change runs are NOT definitive and keep retrying every run.
     """
     low = (reason or "").strip().lower()
-    return low.startswith("cannot fix:") or low.startswith("nonexistent version")
+    return (
+        low.startswith("cannot fix:")
+        or low.startswith("nonexistent version")
+        or low.startswith("added block")
+    )
 
 
 def is_unfixable_cached(

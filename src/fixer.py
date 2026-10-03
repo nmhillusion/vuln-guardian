@@ -495,14 +495,35 @@ def _find_nonexistent_bumped_version(
     return None
 
 
-def apply_fix(
+def _find_added_blocks(
+    pre_snapshots: dict[str, dict[tuple[str, str], str]],
+    repo_path: Path,
+    manifest_paths: list[str | None],
+) -> tuple[str, str, str, str] | None:
+    """Find first added dependency coordinate (in post, missing from pre).
+
+    Only Modify (version bumps on pre-existing coordinates) is accepted;
+    Added blocks are refused. Returns (manifest, group, artifact, version) or None.
+    """
+    for manifest in dict.fromkeys(m for m in manifest_paths if m):
+        post = _snapshot_manifest_versions(repo_path, manifest)
+        if not post:
+            continue
+        pre = pre_snapshots.get(manifest, {})
+        for (group, artifact), version in post.items():
+            if (group, artifact) not in pre:
+                return manifest, group, artifact, version
+    return None
+
+
+def apply_fix_detail(
     config: Config,
     repo_path: Path,
     vulns: list[Vulnerability],
     fix_number: int | None = None,
     max_fixes: int | None = None,
-) -> bool:
-    """Fix a batch of vulnerabilities, logging START/END banners. Returns True if fix applied."""
+) -> tuple[bool, str]:
+    """Fix a batch, logging START/END banners. Returns (ok, reason) for report logging."""
     ids = ", ".join(v.advisory_id for v in vulns)
     position = _fix_position(fix_number, max_fixes)
     logger.info(f"===== START{position} fix batch [{ids}] =====")
@@ -513,6 +534,18 @@ def apply_fix(
         record_batch_unfixable(
             config.state_path, vulns[0].repo_full_name, [v.advisory_id for v in vulns], reason
         )
+    return ok, reason
+
+
+def apply_fix(
+    config: Config,
+    repo_path: Path,
+    vulns: list[Vulnerability],
+    fix_number: int | None = None,
+    max_fixes: int | None = None,
+) -> bool:
+    """Fix a batch of vulnerabilities, logging START/END banners. Returns True if fix applied."""
+    ok, _ = apply_fix_detail(config, repo_path, vulns, fix_number, max_fixes)
     return ok
 
 
@@ -644,6 +677,15 @@ def _apply_fix_inner(
             f" — refusing to commit batch [{tag}]"
         )
         return False, f"nonexistent version {version} for {group}:{artifact}"
+
+    added = _find_added_blocks(pre_versions, repo_path, agent_manifests)
+    if added:
+        manifest, group, artifact, version = added
+        logger.warning(
+            f"Agent added block {manifest} {group}:{artifact}:{version} — only Modify accepted"
+            f" — refusing to commit batch [{tag}]"
+        )
+        return False, f"added block {group}:{artifact}:{version} in {manifest} — only Modify accepted"
 
     commit_msg = f"fix: {len(agent_vulns)} vulnerabilities ({', '.join(v.advisory_id for v in agent_vulns)})"
     if not _commit_changes(repo_path, commit_msg):

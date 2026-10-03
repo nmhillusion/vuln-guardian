@@ -239,7 +239,7 @@ def test_process_repo_skips_cached_unfixable_without_agent(tmp_path):
          patch("src.main.pr_exists_for_branch", return_value=False), \
          patch("src.main.branch_exists", return_value=False), \
          patch("src.main.create_branch", side_effect=AssertionError("must not create branch")), \
-         patch("src.main.apply_fix", side_effect=AssertionError("must not invoke agent")):
+         patch("src.main.apply_fix_detail", side_effect=AssertionError("must not invoke agent")):
         process_repo(MagicMock(), config, "test-org/repo1", [vuln], result)
     assert result.skipped == 1
     assert result.fixes_attempted == 0

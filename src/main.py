@@ -14,7 +14,7 @@ from src.github_client import GitHubClient
 from src.fetcher import list_repos, fetch_repo_advisories
 from src.models import RunResult, Vulnerability
 from src.repo import clone_or_update, detect_default_branch, update_default_branch, branch_exists, create_branch, checkout, sync_prune_fix_branch
-from src.fixer import apply_fix
+from src.fixer import apply_fix_detail
 from src.state import is_unfixable_cached, load_state, save_state
 from src.pr import create_pull_request, pr_exists_for_branch, fetch_open_tool_prs
 from src.reporter import generate_report
@@ -202,9 +202,10 @@ def process_repo(
 
         result.fixes_attempted += 1
 
-        if not apply_fix(config, repo_path, batch, fix_number=result.fixes_attempted, max_fixes=max_fixes):
+        ok, fix_reason = apply_fix_detail(config, repo_path, batch, fix_number=result.fixes_attempted, max_fixes=max_fixes)
+        if not ok:
             logger.info(f"No fix applied for batch {branch_name}, skipping PR")
-            _record_skip(result, repo_full_name, batch, "no fix produced")
+            _record_skip(result, repo_full_name, batch, fix_reason or "no fix produced")
             checkout(repo_path, default_branch)
             subprocess.run(["git", "-C", str(repo_path), "branch", "-D", branch_name], capture_output=True)
             continue
