@@ -612,3 +612,82 @@ def test_apply_fix_direct_dep_no_transitive_rule(tmp_path):
             apply_fix(config, tmp_path, [vuln])
     prompt = _prompt_of_last_agent_call(mock_popen, config)
     assert "TRANSITIVE dependency" not in prompt
+
+
+_MAVEN_POM_WITH_PLUGIN = """<project>
+    <dependencies>
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <version>2.22.2</version>
+        </dependency>
+    </dependencies>
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>2.22.2</version>
+            </plugin>
+        </plugins>
+    </build>
+</project>
+"""
+
+
+def test_maven_versions_from_pom_includes_plugins():
+    from src.fixer import _maven_versions_from_pom
+    versions = _maven_versions_from_pom(_MAVEN_POM_WITH_PLUGIN)
+    assert versions[("com.fasterxml.jackson.core", "jackson-databind")] == "2.22.2"
+    assert versions[("org.apache.maven.plugins", "maven-surefire-plugin")] == "2.22.2"
+
+
+def test_apply_fix_refuses_nonexistent_plugin_bump(tmp_path):
+    backend = tmp_path / "backend"
+    backend.mkdir()
+    (backend / "pom.xml").write_text(_MAVEN_POM_WITH_PLUGIN, encoding="utf-8")
+    config = _make_config()
+    vuln = _make_dep_vuln()
+
+    def _agent_bumps_plugin(*args, **kwargs):
+        (backend / "pom.xml").write_text(
+            _MAVEN_POM_WITH_PLUGIN.replace(
+                "<artifactId>maven-surefire-plugin</artifactId>\n                <version>2.22.2</version>",
+                "<artifactId>maven-surefire-plugin</artifactId>\n                <version>2.22.3</version>",
+            ),
+            encoding="utf-8",
+        )
+        return _fake_proc()
+
+    with patch("subprocess.Popen", side_effect=_agent_bumps_plugin), \
+         patch("subprocess.run") as mock_run, \
+         patch("src.fixer.version_exists_on_central", return_value=False), \
+         patch("src.fixer._commit_changes") as mock_commit:
+        mock_run.return_value = MagicMock(returncode=0)
+        result = apply_fix(config, tmp_path, [vuln])
+    assert result is False
+    mock_commit.assert_not_called()
+
+
+def test_apply_fix_refuses_unknown_version_fail_closed(tmp_path):
+    backend = tmp_path / "backend"
+    backend.mkdir()
+    (backend / "pom.xml").write_text(_MAVEN_POM, encoding="utf-8")
+    config = _make_config()
+    vuln = _make_dep_vuln()
+
+    def _agent_writes_version(*args, **kwargs):
+        (backend / "pom.xml").write_text(
+            _MAVEN_POM.replace("<version>1.41.0</version>", "<version>1.42.0</version>"),
+            encoding="utf-8",
+        )
+        return _fake_proc()
+
+    with patch("subprocess.Popen", side_effect=_agent_writes_version), \
+         patch("subprocess.run") as mock_run, \
+         patch("src.fixer.version_exists_on_central", return_value=None), \
+         patch("src.fixer._commit_changes") as mock_commit:
+        mock_run.return_value = MagicMock(returncode=0)
+        result = apply_fix(config, tmp_path, [vuln])
+    assert result is False
+    mock_commit.assert_not_called()

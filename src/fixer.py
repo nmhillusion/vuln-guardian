@@ -400,7 +400,7 @@ def _maven_versions_from_gradle(text: str) -> dict[tuple[str, str], str]:
 
 
 def _maven_versions_from_pom(text: str) -> dict[tuple[str, str], str]:
-    """{(group, artifact): version} from pom <dependency> blocks, resolving ${properties}."""
+    """{(group, artifact): version} from pom <dependency> and <plugin> blocks, resolving ${properties}."""
     try:
         root = ET.fromstring(text)
     except ET.ParseError:
@@ -418,12 +418,9 @@ def _maven_versions_from_pom(text: str) -> dict[tuple[str, str], str]:
             return props.get(value[2:-1], value)
         return value
 
-    out: dict[tuple[str, str], str] = {}
-    for dep in root.iter():
-        if _xml_local(dep.tag) != "dependency":
-            continue
+    def _coord(block) -> tuple[str, str, str | None]:
         group = artifact = version = None
-        for child in dep:
+        for child in block:
             name = _xml_local(child.tag)
             if child.text is None:
                 continue
@@ -433,6 +430,21 @@ def _maven_versions_from_pom(text: str) -> dict[tuple[str, str], str]:
                 artifact = child.text.strip()
             elif name == "version":
                 version = _resolve(child.text)
+        return group, artifact, version
+
+    out: dict[tuple[str, str], str] = {}
+    for dep in root.iter():
+        if _xml_local(dep.tag) != "dependency":
+            continue
+        group, artifact, version = _coord(dep)
+        if group and artifact and version and not version.startswith("${"):
+            out[(group, artifact)] = version
+    for plug in root.iter():
+        if _xml_local(plug.tag) != "plugin":
+            continue
+        group, artifact, version = _coord(plug)
+        if not group and artifact:
+            group = "org.apache.maven.plugins"
         if group and artifact and version and not version.startswith("${"):
             out[(group, artifact)] = version
     return out
@@ -458,12 +470,13 @@ def _find_nonexistent_bumped_version(
     repo_path: Path,
     pre_snapshots: dict[str, dict[tuple[str, str], str]],
     manifest_paths: list[str | None],
-) -> tuple[str, str, str] | None:
+) -> tuple[str, str, str, str] | None:
     """Diff pre-agent snapshots against current files; verify each NEW version on Central.
 
-    Returns (group, artifact, version) for the first bumped version confirmed
-    missing on Maven Central, else None. Unreachable Central (unknown) fails
-    open with a warning so offline runs are never blocked.
+    Returns (group, artifact, version, status) for the first bumped version that is
+    not confirmed to exist on Maven Central, else None. Status is "missing"
+    (confirmed absent) or "unknown" (Central unreachable). Mandatory validation is
+    fail-closed: both statuses block the commit.
     """
     for manifest in dict.fromkeys(m for m in manifest_paths if m):
         post = _snapshot_manifest_versions(repo_path, manifest)
@@ -473,8 +486,12 @@ def _find_nonexistent_bumped_version(
         for (group, artifact), version in post.items():
             if pre.get((group, artifact)) == version:
                 continue
-            if version_exists_on_central(group, artifact, version) is False:
-                return group, artifact, version
+            exists = version_exists_on_central(group, artifact, version)
+            if exists is True:
+                continue
+            if exists is False:
+                return group, artifact, version, "missing"
+            return group, artifact, version, "unknown"
     return None
 
 
@@ -615,7 +632,13 @@ def _apply_fix_inner(
 
     bad = _find_nonexistent_bumped_version(repo_path, pre_versions, agent_manifests)
     if bad:
-        group, artifact, version = bad
+        group, artifact, version, status = bad
+        if status == "unknown":
+            logger.warning(
+                f"Agent bumped {group}:{artifact} to {version}, which could not be verified on Maven Central"
+                f" — refusing to commit batch [{tag}]"
+            )
+            return False, f"unverified version {version} for {group}:{artifact}"
         logger.warning(
             f"Agent bumped {group}:{artifact} to {version}, which does not exist on Maven Central"
             f" — refusing to commit batch [{tag}]"
