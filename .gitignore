@@ -4,3 +4,4 @@ vuln-guardian.log
 __pycache__/
 .pytest_cache/
 report.html
+vuln-guardian-state.json
