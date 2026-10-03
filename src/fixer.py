@@ -466,6 +466,70 @@ def _snapshot_manifest_versions(repo_path: Path, manifest_path: str) -> dict[tup
     return {}
 
 
+_MANIFEST_SUFFIXES = (".xml", ".gradle", ".gradle.kts")
+
+
+def _changed_manifest_files(repo_path: Path) -> list[str]:
+    """List changed manifest-like files (tracked + untracked). [] on git failure."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_path), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except Exception:
+        return []
+    if result.returncode != 0:
+        return []
+    out: list[str] = []
+    for line in result.stdout.splitlines():
+        path = line[3:].strip().strip('"')
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1].strip()
+        if path.endswith(_MANIFEST_SUFFIXES):
+            out.append(path.replace("\\", "/"))
+    return out
+
+
+def _pre_snapshot_from_head(repo_path: Path, manifest_path: str) -> dict[tuple[str, str], str]:
+    """Parse manifest versions from HEAD (pre-agent state). {} when missing/unreadable."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_path), "show", f"HEAD:{manifest_path}"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except Exception:
+        return {}
+    if result.returncode != 0 or not result.stdout:
+        return {}
+    text = result.stdout
+    if manifest_path.endswith(".xml"):
+        return _maven_versions_from_pom(text)
+    if manifest_path.endswith(".gradle") or manifest_path.endswith(".gradle.kts"):
+        return _maven_versions_from_gradle(text)
+    return {}
+
+
+def _full_pre_snapshots(
+    repo_path: Path,
+    pre_snapshots: dict[str, dict[tuple[str, str], str]],
+    manifest_paths: list[str | None],
+) -> tuple[dict[str, dict[tuple[str, str], str]], list[str]]:
+    """Union listed manifests + changed manifest files, filling missing pre from HEAD."""
+    changed = _changed_manifest_files(repo_path)
+    merged_paths = list(dict.fromkeys([m for m in manifest_paths if m] + changed))
+    full = dict(pre_snapshots)
+    for m in merged_paths:
+        if m not in full:
+            full[m] = _pre_snapshot_from_head(repo_path, m)
+    return full, merged_paths
+
+
 def _find_nonexistent_bumped_version(
     repo_path: Path,
     pre_snapshots: dict[str, dict[tuple[str, str], str]],
@@ -663,7 +727,9 @@ def _apply_fix_inner(
             return lockfix_committed, ("" if lockfix_committed else f"cannot fix: {marker}")
         return lockfix_committed, ("" if lockfix_committed else "no changes produced")
 
-    bad = _find_nonexistent_bumped_version(repo_path, pre_versions, agent_manifests)
+    full_pre, check_manifests = _full_pre_snapshots(repo_path, pre_versions, agent_manifests)
+
+    bad = _find_nonexistent_bumped_version(repo_path, full_pre, check_manifests)
     if bad:
         group, artifact, version, status = bad
         if status == "unknown":
@@ -678,7 +744,7 @@ def _apply_fix_inner(
         )
         return False, f"nonexistent version {version} for {group}:{artifact}"
 
-    added = _find_added_blocks(pre_versions, repo_path, agent_manifests)
+    added = _find_added_blocks(full_pre, repo_path, check_manifests)
     if added:
         manifest, group, artifact, version = added
         logger.warning(
