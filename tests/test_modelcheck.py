@@ -122,3 +122,28 @@ def test_validate_model_all_probes_fail_closed():
     assert reason is not None
     assert "has no model-list capability" in reason
     assert "'models': exit 1" in reason and "'--model-list': exit 2" in reason
+
+
+def test_validate_model_none_model_fail_closed():
+    # YAML `ai_agent_model:` (blank) parses to None — must give the pinned error line, not a traceback
+    with patch("src.modelcheck.subprocess.run") as mock_run:
+        reason = validate_model(_config(model=None))
+    assert reason is not None
+    assert "ai_agent_model is empty" in reason
+    mock_run.assert_not_called()
+
+
+def test_validate_model_non_string_model_fail_closed():
+    with patch("src.modelcheck.subprocess.run") as mock_run:
+        reason = validate_model(_config(model=123))
+    assert reason is not None
+    assert "ai_agent_model is empty" in reason
+    mock_run.assert_not_called()
+
+
+def test_validate_model_default_timeout_is_30s():
+    # real agent measured at ~7.2-7.5s per probe on this machine; 10s was too tight
+    with patch("src.modelcheck.subprocess.run",
+               return_value=_completed("kilo/stepfun/step-3.7-flash:free")) as mock_run:
+        assert validate_model(_config(model="kilo/stepfun/step-3.7-flash:free")) is None
+    assert mock_run.call_args.kwargs["timeout"] == 30.0

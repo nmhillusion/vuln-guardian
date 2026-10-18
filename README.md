@@ -57,7 +57,7 @@ copy .env.example .env  # then edit GITHUB_PAT
 | `clone_dir` | `"../.repos"` | Where repos are cloned |
 | `report_path` | `"report.html"` | HTML report output |
 | `ai_agent_args` | `["kilo.cmd","run","--auto","-m","{model}","--variant","minimal","--dir","{repo_dir}"]` | Agent command template. Placeholders: `{repo_dir}`, `{model}`, `{prompt}` |
-| `ai_agent_model` | `"kilo/stepfun/step-3.7-flash:free"` | Substituted for `{model}`. Validated at startup in fix mode (static checks + one live agent model-list probe, 10s); invalid or unverifiable ⇒ run stops immediately with `AI model validation failed: ...` before any cloning/fixing |
+| `ai_agent_model` | `"kilo/liquid/lfm-2.5-2.6b:free"` | Substituted for `{model}`. Validated at startup in fix mode (static checks + one live agent model-list probe, 30s); invalid or unverifiable ⇒ run stops immediately with `AI model validation failed: ...` (listing the agent's free models when the model isn't offered) before any cloning/fixing |
 | `ai_agent_stdin` | `true` | Pipe prompt via stdin (`true`) or argv `{prompt}` (`false`) |
 
 Auth: `GITHUB_PAT` or `GITHUB_TOKEN` env var (see `.env.example`).

@@ -26,12 +26,13 @@ def _list_models(agent: str, timeout: float) -> tuple[list[str] | None, str | No
     return None, ",".join(details)
 
 
-def validate_model(config: Config, timeout: float = 10.0) -> str | None:
+def validate_model(config: Config, timeout: float = 30.0) -> str | None:
     """Static + live check of ai_agent_model. Returns a failure reason or None."""
     if not config.ai_agent_args or "{model}" not in config.ai_agent_args:
         return None
 
-    model = config.ai_agent_model
+    # YAML `ai_agent_model:` (blank) parses to None; non-strings are treated as empty
+    model = config.ai_agent_model if isinstance(config.ai_agent_model, str) else ""
     if not model.strip():
         return "ai_agent_args uses {model} but ai_agent_model is empty. Fix 'ai_agent_model' in config.yaml."
 
