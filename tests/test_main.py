@@ -245,3 +245,44 @@ def test_process_repo_skips_cached_unfixable_without_agent(tmp_path):
     assert result.fixes_attempted == 0
     assert result.prs_created == 0
     assert "cached" in result.skipped_items[0]["reason"]
+
+
+def test_main_invalid_model_exits_before_any_work(tmp_path):
+    from src.config import Config
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("org: test-org\n")
+    cfg = Config(org="test-org", clone_dir=str(tmp_path / "clones"),
+                 report_path=str(tmp_path / "report.html"), github_pat="ghp_test")
+    with patch("src.main.load_config", return_value=cfg), \
+         patch("src.main.validate_model",
+               return_value="model 'bad' not offered by agent 'kilo'. Fix 'ai_agent_model' in config.yaml."), \
+         patch("src.main.logger") as mock_logger, \
+         patch("src.main.GitHubClient") as mock_client, \
+         patch("src.main.list_repos") as mock_list:
+        with pytest.raises(SystemExit) as exc:
+            main(["--config", str(config_path)])
+    assert exc.value.code == 1
+    logged = " ".join(str(c.args[0]) for c in mock_logger.error.call_args_list)
+    assert "AI model validation failed: model 'bad' not offered" in logged
+    mock_client.assert_not_called()
+    mock_list.assert_not_called()
+    assert not (tmp_path / "clones").exists()
+
+
+def test_main_validation_skipped_in_dry_run_and_report_only(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text('org: "test-org"\nclone_dir: ".repos"\nreport_path: "report.html"\n')
+    for extra in (["--dry-run"], ["--report-only"]):
+        with patch("src.main.load_config") as mock_config, \
+             patch("src.main.validate_model",
+                   side_effect=AssertionError("validation must not run")), \
+             patch("src.main.GitHubClient") as mock_client_cls, \
+             patch("src.main.list_repos", return_value=[]), \
+             patch("src.main.fetch_repo_advisories"), \
+             patch("src.main.webbrowser"), \
+             patch("src.main.generate_report", return_value="<html></html>"):
+            mock_config.return_value = MagicMock(
+                org="test-org", clone_dir=str(tmp_path / ".repos"),
+                report_path=str(tmp_path / "report.html"), github_pat="ghp_test")
+            mock_client_cls.return_value = MagicMock()
+            main(["--config", str(config_path), *extra])

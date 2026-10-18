@@ -591,9 +591,17 @@ def test_apply_fix_npm_lockfile_commit_fails_falls_back_to_agent(tmp_path):
     vuln.manifest_path = "package-lock.json"
     vuln.dependency_relationship = "transitive"
     ok, fail = MagicMock(returncode=0), MagicMock(returncode=1)
-    with patch("subprocess.Popen") as mock_popen, patch("subprocess.run") as mock_run:
+    lock_commit_calls = {"n": 0}
+    def _run_dispatch(*args, **kwargs):
+        cmd = args[0] if args else kwargs.get("args", [])
+        if isinstance(cmd, list) and "commit" in cmd:
+            lock_commit_calls["n"] += 1
+            return fail if lock_commit_calls["n"] == 1 else ok
+        if isinstance(cmd, list) and cmd[:2] == ["git", "-C"]:
+            return MagicMock(returncode=1, stdout="", stderr="")
+        return ok
+    with patch("subprocess.Popen") as mock_popen, patch("subprocess.run", side_effect=_run_dispatch):
         mock_popen.return_value = _fake_proc()
-        mock_run.side_effect = [ok, fail, ok, ok]
         with patch("src.fixer._has_changes", return_value=True):
             result = apply_fix(config, tmp_path, [vuln])
     assert result is True
@@ -749,3 +757,56 @@ def test_apply_fix_allows_modify_only_version_bump(tmp_path):
         ok, reason = apply_fix_detail(config, tmp_path, [vuln])
     assert ok is True
     mock_commit.assert_called_once()
+
+
+_SETTINGS_GRADLE = """plugins {
+    id("org.owasp.dependencycheck") version "13.0.0"
+}
+"""
+
+_BUILD_GRADLE = """dependencies {
+    implementation("org.apache.calcite:calcite-core:1.42.0")
+    constraints {
+        implementation("net.minidev:json-smart:2.5.2") {
+        }
+    }
+}
+"""
+
+
+def test_apply_fix_refuses_added_block_in_unlisted_file(tmp_path):
+    import subprocess
+    from src.fixer import apply_fix_detail
+    (tmp_path / "settings.gradle.kts").write_text(_SETTINGS_GRADLE, encoding="utf-8")
+    (tmp_path / "build.gradle.kts").write_text(_BUILD_GRADLE, encoding="utf-8")
+    subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
+    subprocess.run(["git", "config", "user.email", "t@t.t"], cwd=str(tmp_path), capture_output=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=str(tmp_path), capture_output=True)
+    subprocess.run(["git", "add", "-A"], cwd=str(tmp_path), capture_output=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=str(tmp_path), capture_output=True)
+    config = _make_config()
+    vuln = _make_vuln()
+    vuln.source = "dependabot"
+    vuln.package_name = "org.apache.httpcomponents.client5:httpclient5"
+    vuln.patched_version = "5.6.3"
+    vuln.manifest_path = "settings.gradle.kts"
+    vuln.dependency_relationship = "transitive"
+
+    def _agent_adds_to_build(*args, **kwargs):
+        (tmp_path / "build.gradle.kts").write_text(
+            _BUILD_GRADLE.replace(
+                "    }",
+                '        implementation("org.apache.calcite.avatica:avatica-core:1.29.0") {\n        }\n    }',
+                1,
+            ),
+            encoding="utf-8",
+        )
+        return 0, "agent ok"
+
+    with patch("src.fixer._run_agent_streaming", side_effect=_agent_adds_to_build), \
+         patch("src.fixer.version_exists_on_central", return_value=True), \
+         patch("src.fixer._commit_changes") as mock_commit:
+        ok, reason = apply_fix_detail(config, tmp_path, [vuln])
+    assert ok is False
+    assert "added block" in reason
+    mock_commit.assert_not_called()

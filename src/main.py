@@ -13,6 +13,7 @@ from src.config import load_config, Config
 from src.github_client import GitHubClient
 from src.fetcher import list_repos, fetch_repo_advisories
 from src.models import RunResult, Vulnerability
+from src.modelcheck import validate_model
 from src.repo import clone_or_update, detect_default_branch, update_default_branch, branch_exists, create_branch, checkout, sync_prune_fix_branch
 from src.fixer import apply_fix_detail
 from src.state import is_unfixable_cached, load_state, save_state
@@ -264,6 +265,12 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.org:
         config.org = args.org
+
+    if not args.dry_run and not args.report_only:
+        reason = validate_model(config)
+        if reason:
+            logger.error(f"AI model validation failed: {reason}")
+            sys.exit(1)
 
     if not args.dry_run and not args.report_only:
         clone_path = Path(config.clone_dir).resolve()
