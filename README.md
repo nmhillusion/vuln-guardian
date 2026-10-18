@@ -57,7 +57,7 @@ copy .env.example .env  # then edit GITHUB_PAT
 | `clone_dir` | `"../.repos"` | Where repos are cloned |
 | `report_path` | `"report.html"` | HTML report output |
 | `ai_agent_args` | `["kilo.cmd","run","--auto","-m","{model}","--variant","minimal","--dir","{repo_dir}"]` | Agent command template. Placeholders: `{repo_dir}`, `{model}`, `{prompt}` |
-| `ai_agent_model` | `"kilo/stepfun/step-3.7-flash:free"` | Substituted for `{model}` |
+| `ai_agent_model` | `"kilo/stepfun/step-3.7-flash:free"` | Substituted for `{model}`. Validated at startup in fix mode (static checks + one live agent model-list probe, 10s); invalid or unverifiable ⇒ run stops immediately with `AI model validation failed: ...` before any cloning/fixing |
 | `ai_agent_stdin` | `true` | Pipe prompt via stdin (`true`) or argv `{prompt}` (`false`) |
 
 Auth: `GITHUB_PAT` or `GITHUB_TOKEN` env var (see `.env.example`).
@@ -147,5 +147,6 @@ pytest tests/test_main.py -q
 - `Configuration error: GITHUB_PAT ... required` → set `$env:GITHUB_PAT` or `GITHUB_TOKEN`.
 - `Failed to fetch repos` → PAT missing `repo` / `security_events` scopes.
 - `Agent timed out / exit N` → check `ai_agent_args` binary path, model name, and `ai_agent_stdin` setting; tail is logged (last 20 lines).
+- `AI model validation failed: ...` → startup check stopped the run before fixing: fix `ai_agent_model` in `config.yaml` (or `ai_agent_args` if the agent binary is not runnable); the reason says whether the model was rejected by the agent or could not be verified.
 - `No changes after agent run` → agent emitted `CANNOT FIX:` or produced no diff; reason appears in Skipped table.
 - SBOM `None` → Dependency Graph disabled or no permission; transitive chains are skipped gracefully.
